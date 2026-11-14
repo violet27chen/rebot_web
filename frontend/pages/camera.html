@@ -4,7 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>摄像头 · reBot 控制台</title>
   <link rel="icon" type="image/svg+xml" href="/static/img/logo.svg">
-  <link rel="stylesheet" href="/static/css/style.css?v=3.5.4-20261114-20-r2">
+  <link rel="stylesheet" href="/static/css/style.css?v=3.5.4-20261114-21">
 </head>
 <body>
   <div id="shell"></div>
@@ -42,6 +42,7 @@
         <div class="field"><label for="camName">相机名称</label><input id="camName" required maxlength="60" placeholder="例如：顶部 / 左腕 / 右腕"></div>
         <div class="field"><label for="devicePicker">已发现的视频设备</label><select id="devicePicker"></select><span class="hint">仅列出可以采集图像的节点，自动排除元数据节点。</span></div>
         <div class="field"><label for="camSource">设备编号或稳定路径</label><input id="camSource" required placeholder="/dev/video4 或 /dev/v4l/by-path/…"><span class="hint">稳定路径可避免重启或插拔后编号变化。</span></div>
+        <div class="field"><label for="camPreset">分辨率预设</label><select id="camPreset"></select><span class="hint">选预设会自动填入宽高，也可手动输入任意分辨率。</span></div>
         <div class="row"><div class="field"><label for="camWidth">宽度</label><input id="camWidth" type="number" min="16" max="7680" required value="640"></div><div class="field"><label for="camHeight">高度</label><input id="camHeight" type="number" min="16" max="4320" required value="480"></div><div class="field"><label for="camFps">采集 FPS</label><input id="camFps" type="number" min="1" max="120" required value="30"></div></div>
         <div class="row"><div class="field"><label for="camType">后端</label><select id="camType"><option value="opencv">OpenCV · USB 彩色</option><option value="realsense">RealSense SDK</option><option value="orbbec">Orbbec SDK</option></select></div><div class="field"><label for="camFourcc">传输格式</label><input id="camFourcc" maxlength="4" minlength="4" required value="MJPG"></div></div>
         <label class="check"><input id="camPreview" type="checkbox" checked>打开本页时自动预览</label>
@@ -51,6 +52,6 @@
   </main>
   <script src="/static/js/common.js?v=3.5.4-20261114-20-r2"></script>
   <script src="/static/js/autosave.js?v=3.5.4-20261114-20-r2"></script>
-  <script src="/static/js/camera.js?v=3.5.4-20261114-20-r2"></script>
+  <script src="/static/js/camera.js?v=3.5.4-20261114-21"></script>
 </body>
 </html>

@@ -1173,3 +1173,5 @@ button, .btn { border-radius: 8px; min-height: 38px; }
 .monitor-model-binding[hidden]{display:none}
 .monitor-preview-view .monitor-model-binding{font-size:13px;padding:5px 9px}
 @media(max-width:900px){.monitor-model-binding{font-size:8px;padding:1px 3px}}
+.camera-res{margin:6px 0;font-size:12px}.camera-res select{margin-left:6px}
+.camera-res{margin:6px 0;font-size:12px}.camera-res select{margin-left:6px}

@@ -89,6 +89,14 @@
       failed(c, '等待图像超时，请检查 USB 带宽、设备占用及 MJPG 设置');
     }, 12000));
   }
+  var RES_PRESETS = [[320,240],[640,480],[800,600],[1024,768],[1280,720],[1920,1080],[2560,1440]];
+  function resOptions(w, h) {
+    var list = RES_PRESETS.slice();
+    if (!list.some(function (r) { return r[0] === Number(w) && r[1] === Number(h); })) list.unshift([Number(w), Number(h)]);
+    return list.map(function (r) {
+      return '<option value="' + r[0] + 'x' + r[1] + '"' + (r[0] === Number(w) && r[1] === Number(h) ? ' selected' : '') + '>' + r[0] + ' × ' + r[1] + '</option>';
+    }).join('');
+  }
   function render() {
     // Detach old HTTP streams before rebuilding cards; keep per-device intent.
     grid.querySelectorAll('img').forEach(function (img) { img.onload = img.onerror = null; img.removeAttribute('src'); });
@@ -100,7 +108,8 @@
         '<div class="camera-preview"><img hidden alt="' + A.esc(c.name) + ' 实时画面"><div class="camera-placeholder"><p>' +
         (isPending ? '保存配置后即可预览' : sdk ? 'SDK 相机请使用下方高级诊断' : '预览已暂停') + '</p></div></div><footer>' +
         '<div class="camera-meta">' + A.esc(c.width) + ' × ' + A.esc(c.height) + ' · 采集 ' + A.esc(c.fps) + ' FPS · ' + A.esc(c.fourcc || 'MJPG') + '</div>' +
-        '<div class="camera-actions"><button class="btn sm" data-toggle data-app-nofb' + (isPending || sdk ? ' disabled' : '') + '>启动预览</button>' +
+        '<div class="camera-res"><label>分辨率 <select data-res aria-label="修改 ' + A.esc(c.name) + ' 分辨率">' + resOptions(c.width, c.height) + '</select></label></div>' +
+         '<div class="camera-actions"><button class="btn sm" data-toggle data-app-nofb' + (isPending || sdk ? ' disabled' : '') + '>启动预览</button>' +
         '<button class="btn subtle sm" data-snapshot data-app-nofb' + (isPending || sdk ? ' disabled' : '') + '>抓拍</button>' +
         '<button class="btn subtle sm" data-move="-1" data-app-nofb aria-label="将 ' + A.esc(c.name) + ' 画面前移" title="画面前移"' + (index === 0 ? ' disabled' : '') + '>前移</button>' +
         '<button class="btn subtle sm" data-move="1" data-app-nofb aria-label="将 ' + A.esc(c.name) + ' 画面后移" title="画面后移"' + (index === cameras.length - 1 ? ' disabled' : '') + '>后移</button>' +
@@ -132,8 +141,18 @@
     A.el('camSource').value = initial;
     [['camWidth','width'],['camHeight','height'],['camFps','fps'],['camType','type'],['camFourcc','fourcc']].forEach(function (p) { A.el(p[0]).value = defaults[p[1]] || (p[1] === 'fourcc' ? 'MJPG' : 'opencv'); });
     A.el('camPreview').checked = defaults.preview !== false;
+    A.el('camPreset').innerHTML = '<option value="">自定义（手动填写宽高）</option>' + resOptions(A.el('camWidth').value, A.el('camHeight').value);
+    A.el('camPreset').value = A.el('camWidth').value + 'x' + A.el('camHeight').value;
     dialog.showModal();
   }
+  A.el('camPreset').onchange = function () {
+    if (!this.value) return; var m = this.value.split('x');
+    A.el('camWidth').value = m[0]; A.el('camHeight').value = m[1]; editChanged();
+  };
+  ['camWidth','camHeight'].forEach(function (id) { A.el(id).addEventListener('input', function () {
+    var v = A.el('camWidth').value + 'x' + A.el('camHeight').value, p = A.el('camPreset');
+    p.value = Array.from(p.options).some(function (o) { return o.value === v; }) ? v : '';
+  }); });
   A.el('devicePicker').onchange = function () { if (this.value) A.el('camSource').value = this.value; };
   A.el('btnCancelCamera').onclick = function () { dialog.close(); };
   dialog.addEventListener('click', function (e) { if (e.target === dialog) { var r = dialog.getBoundingClientRect(); if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) dialog.close(); } });
@@ -154,6 +173,17 @@
   A.el('btnSaveCam').onclick = function(){cameraBinding.flush().catch(function(){});};
   A.el('btnPreviewAll').onclick = function () { cameras.forEach(function(c){start(c);}); };
   A.el('btnPauseAll').onclick = function () { cameras.forEach(function(c){stop(c);}); };
+  function setResolution(c, w, h) {
+    if (!c || !(w >= 16 && h >= 16) || (Number(c.width) === w && Number(c.height) === h)) return;
+    if (running.has(c._id)) resumeAfterSave.add(c._id);
+    stop(c); pending.add(c._id);
+    c.width = w; c.height = h; setDirty(); render();
+  }
+  grid.onchange = function (e) {
+    var sel = e.target.closest('select[data-res]'); if (!sel) return;
+    var box = sel.closest('[data-camera]'), c = cameras.find(function (x) { return String(x._id) === box.dataset.camera; });
+    var m = sel.value.split('x'); setResolution(c, Number(m[0]), Number(m[1]));
+  };
   grid.onclick = function (e) {
     var b = e.target.closest('button'); if (!b) return;
     if (b.hasAttribute('data-empty-add')) { openEditor(); return; }
@@ -203,7 +233,7 @@
   function refreshCards(){
     var current=Array.from(grid.querySelectorAll('[data-camera]')).map(function(n){return Number(n.dataset.camera);});
     if(JSON.stringify(current)!==JSON.stringify(cameras.map(function(c){return c._id;}))){render();return;}
-    cameras.forEach(function(c){var t=tile(c._id);t.querySelector('[data-toggle]').disabled=pending.has(c._id);t.querySelector('[data-snapshot]').disabled=pending.has(c._id);t.querySelector('h3').textContent=c.name;t.querySelector('.camera-source').textContent=sourceLabel(c);t.querySelector('.camera-meta').textContent=c.width+' × '+c.height+' · 采集 '+c.fps+' FPS · '+(c.fourcc||'MJPG');});
+    cameras.forEach(function(c){var t=tile(c._id);t.querySelector('[data-toggle]').disabled=pending.has(c._id);t.querySelector('[data-snapshot]').disabled=pending.has(c._id);t.querySelector('h3').textContent=c.name;t.querySelector('.camera-source').textContent=sourceLabel(c);t.querySelector('.camera-meta').textContent=c.width+' × '+c.height+' · 采集 '+c.fps+' FPS · '+(c.fourcc||'MJPG');var rs=t.querySelector('[data-res]');if(rs)rs.innerHTML=resOptions(c.width,c.height);});
   }
   function applyCameraConfig(cfg){
     var next=cfg.cameras||[], previous=cameras.slice(), restart=[];
