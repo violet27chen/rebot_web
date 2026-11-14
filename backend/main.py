@@ -6283,6 +6283,227 @@ def api_arm_hold():
     return _arm_send("hold")
 
 
+# ==================================================================
+# 14. 快递面单条码 / 二维码实时识别（纯 RGB 相机流，无需深度相机或 YOLO）
+# ==================================================================
+_WAYBILL_LOCK = threading.Lock()
+_WAYBILL_HISTORY: list[dict] = []
+_WAYBILL_LATEST: Optional[dict] = None
+
+
+def _decode_waybill_frame(image: Any) -> dict:
+    """从单帧 BGR 图像中识别一维条码（Code128/Code39/EAN/ITF 等）与二维码。"""
+    import cv2
+    import numpy as np
+
+    if image is None or not hasattr(image, "shape") or image.size == 0:
+        return {"codes": [], "sharpness": 0.0}
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    found: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(text: Any, fmt: Any) -> None:
+        t = str(text or "").strip()
+        f = str(fmt or "Barcode").strip().replace("BarcodeFormat.", "")
+        if not t or len(t) < 3:
+            return
+        key = (t, f)
+        if key not in seen:
+            seen.add(key)
+            found.append({"text": t, "type": f})
+
+    # 1. 优先使用 zxing-cpp（支持一维快递面单条码 Code128/Code39/ITF/EAN 及 QR/DataMatrix）
+    try:
+        import zxingcpp  # type: ignore
+
+        clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8)).apply(gray)
+        candidates = [image, gray, clahe]
+        for cand in candidates:
+            for item in zxingcpp.read_barcodes(cand):
+                _add(getattr(item, "text", ""), getattr(item, "format", "Barcode"))
+            if found:
+                break
+        # 若原图未扫出且分辨率较低，放大 1.7 倍再试一次细小面单条码
+        if not found and min(gray.shape[:2]) <= 720:
+            up = cv2.resize(clahe, None, fx=1.7, fy=1.7, interpolation=cv2.INTER_CUBIC)
+            for item in zxingcpp.read_barcodes(up):
+                _add(getattr(item, "text", ""), getattr(item, "format", "Barcode"))
+    except Exception:
+        pass
+
+    # 2. OpenCV QRCodeDetector 兜底
+    if not found:
+        try:
+            qr = cv2.QRCodeDetector()
+            ok, decoded_info, _, _ = qr.detectAndDecodeMulti(gray)
+            if ok and decoded_info:
+                for txt in decoded_info:
+                    _add(txt, "QRCode")
+            else:
+                txt, _, _ = qr.detectAndDecode(gray)
+                _add(txt, "QRCode")
+        except Exception:
+            pass
+
+    return {"codes": found, "sharpness": round(sharpness, 1)}
+
+
+@app.get("/api/waybill/history")
+def api_waybill_history():
+    with _WAYBILL_LOCK:
+        return {
+            "ok": True,
+            "latest": _WAYBILL_LATEST,
+            "history": list(_WAYBILL_HISTORY),
+            "count": len(_WAYBILL_HISTORY),
+        }
+
+
+@app.post("/api/waybill/clear")
+def api_waybill_clear():
+    global _WAYBILL_LATEST
+    with _WAYBILL_LOCK:
+        _WAYBILL_HISTORY.clear()
+        _WAYBILL_LATEST = None
+    HUB.log("[快递单号识别] 已清空单号识别记录", "info")
+    return {"ok": True, "latest": None, "history": [], "count": 0}
+
+
+@app.post("/api/waybill/scan")
+def api_waybill_scan(payload: Optional[dict] = Body(default=None)):
+    global _WAYBILL_LATEST
+    req = payload or {}
+    target_cam = str(req.get("camera") or "all").strip()
+    cfg = load_config()
+    cams = cfg.get("cameras") or []
+    if not cams:
+        return {
+            "ok": False,
+            "found": False,
+            "error": "尚未配置任何摄像头，请先在「摄像头」页面添加相机",
+            "codes": [],
+            "latest": _WAYBILL_LATEST,
+            "history": list(_WAYBILL_HISTORY),
+            "scanned_cameras": [],
+        }
+
+    selected_cams = []
+    if not target_cam or target_cam.lower() == "all":
+        selected_cams = list(cams)
+    else:
+        for c in cams:
+            c_name = str(c.get("name") or "").strip()
+            c_src = str(c.get("index_or_path", "")).strip()
+            if target_cam in (c_name, c_src) or source_key(target_cam) == source_key(c_src):
+                selected_cams.append(c)
+        if not selected_cams:
+            selected_cams = list(cams)
+
+    scanned_cameras: list[dict] = []
+    detected_now: list[dict] = []
+    errors: list[str] = []
+    now_str = time.strftime("%H:%M:%S")
+    now_ts = round(time.time(), 3)
+
+    for c in selected_cams:
+        cam_name = str(c.get("name") or c.get("index_or_path") or "camera")
+        src = c.get("index_or_path", 0)
+        cap = None
+        try:
+            cap = camera_probe(src)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                errors.append(f"{cam_name}({src}): 未读到画面帧")
+                scanned_cameras.append({
+                    "name": cam_name,
+                    "source": str(src),
+                    "ok": False,
+                    "sharpness": 0.0,
+                    "found": 0,
+                })
+                continue
+            res = _decode_waybill_frame(frame)
+            codes = res.get("codes") or []
+            scanned_cameras.append({
+                "name": cam_name,
+                "source": str(src),
+                "ok": True,
+                "sharpness": res.get("sharpness", 0.0),
+                "found": len(codes),
+            })
+            for item in codes:
+                entry = {
+                    "text": item["text"],
+                    "type": item["type"],
+                    "camera": cam_name,
+                    "source": str(src),
+                    "time": now_str,
+                    "ts": now_ts,
+                }
+                detected_now.append(entry)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{cam_name}({src}): {_brief(exc)}")
+            scanned_cameras.append({
+                "name": cam_name,
+                "source": str(src),
+                "ok": False,
+                "sharpness": 0.0,
+                "found": 0,
+            })
+        finally:
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+
+    new_codes: list[dict] = []
+    with _WAYBILL_LOCK:
+        for entry in detected_now:
+            _WAYBILL_LATEST = entry
+            existing_idx = next(
+                (i for i, h in enumerate(_WAYBILL_HISTORY) if h.get("text") == entry["text"]),
+                None,
+            )
+            if existing_idx is None:
+                _WAYBILL_HISTORY.insert(0, entry)
+                if len(_WAYBILL_HISTORY) > 100:
+                    del _WAYBILL_HISTORY[100:]
+                new_codes.append(entry)
+            else:
+                prev = _WAYBILL_HISTORY[existing_idx]
+                prev["time"] = entry["time"]
+                prev["ts"] = entry["ts"]
+                prev["camera"] = entry["camera"]
+                prev["type"] = entry["type"]
+                if existing_idx > 0:
+                    _WAYBILL_HISTORY.pop(existing_idx)
+                    _WAYBILL_HISTORY.insert(0, prev)
+        latest_snap = _WAYBILL_LATEST
+        history_snap = list(_WAYBILL_HISTORY)
+
+    for nc in new_codes:
+        HUB.log(
+            f"[快递单号识别] 已识别到快递单号：{nc['text']}（格式：{nc['type']} · 相机：{nc['camera']}）",
+            "ok",
+        )
+
+    any_cam_ok = any(sc.get("ok") for sc in scanned_cameras)
+    return {
+        "ok": any_cam_ok,
+        "found": len(detected_now) > 0,
+        "codes": detected_now,
+        "new_codes": new_codes,
+        "latest": latest_snap,
+        "history": history_snap,
+        "count": len(history_snap),
+        "scanned_cameras": scanned_cameras,
+        "error": ("；".join(errors) if not any_cam_ok and errors else ""),
+    }
+
+
 @app.websocket("/ws/logs")
 async def ws_logs(ws: WebSocket):
     await ws.accept()

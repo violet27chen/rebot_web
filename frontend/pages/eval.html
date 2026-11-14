@@ -11,8 +11,56 @@
   <div id="page" class="page">
     <div id="evalAlert" class="alert"></div>
 
-    <details class="card advanced-settings"><summary>高级：独立 ACT 真机评估</summary>
-      <div class="card-h"><h2>策略评估</h2><span class="sub">lerobot-record + --policy.path · 真机跑策略</span></div>
+    <div class="card">
+      <div class="card-h">
+        <h2>快递单号实时识别</h2>
+        <span class="sub" id="waybillScanState">纯 RGB 摄像头条码 / 二维码解码 · 无需深度相机与 YOLO</span>
+      </div>
+      <div id="waybillBanner" style="border:2px solid var(--border,#cbd5e1);border-radius:10px;padding:14px 18px;background:var(--bg-subtle,rgba(148,163,184,0.08));display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+        <div>
+          <div style="font-size:12.5px;color:var(--muted,#64748b);margin-bottom:4px" id="waybillBannerLabel">当前识别状态</div>
+          <div style="font-size:22px;font-weight:700;letter-spacing:0.3px;word-break:break-all" id="waybillBannerCode">等待识别快递单号…</div>
+        </div>
+        <div id="waybillBannerMeta" class="muted" style="font-size:13px;text-align:right">将快递面单朝向任意已配置摄像头即可识别</div>
+      </div>
+      <div class="row" style="margin-top:12px;align-items:flex-end;gap:12px;flex-wrap:wrap">
+        <div class="field" style="min-width:220px">
+          <label for="waybillCamSelect">扫码相机源</label>
+          <select id="waybillCamSelect">
+            <option value="all">全部已配置相机（自动轮询）</option>
+          </select>
+        </div>
+        <div class="btn-row">
+          <button class="btn primary" type="button" id="btnScanWaybill">立即扫描单号</button>
+          <button class="btn subtle" type="button" id="btnClearWaybill">清空识别记录</button>
+        </div>
+        <label class="check" style="margin-bottom:6px">
+          <input type="checkbox" id="chkAutoScanWaybill" checked> 分拣/评估运行时自动连续扫码
+        </label>
+        <label class="check" style="margin-bottom:6px">
+          <input type="checkbox" id="chkIdleScanWaybill"> 空闲时也保持实时扫码
+        </label>
+      </div>
+      <div class="scroll" style="margin-top:12px;max-height:220px">
+        <table class="table" id="waybillTable">
+          <thead>
+            <tr>
+              <th style="width:60px">#</th>
+              <th>已识别到快递单号</th>
+              <th style="width:120px">条码类型</th>
+              <th style="width:140px">识别相机</th>
+              <th style="width:110px">识别时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td colspan="5" class="muted">暂无已识别单号，点击「立即扫描单号」或启动评估自动识别</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>ACT 快递分拣 · 策略评估</h2><span class="sub">lerobot-record + --policy.path · 真机跑策略</span></div>
       <form id="evalForm">
         <div class="field"><label>策略模型路径</label><select name="policy_path"></select></div>
         <div class="field" style="margin-top:10px"><label>评估数据集 repo_id</label><input name="repo_id"></div>
@@ -34,10 +82,10 @@
           <button class="btn" type="button" id="btnEvalHomeDisable">一键收工归零并失能</button>
         </div>
         <div class="note" style="margin-top:12px">
-          需要先连接主从臂与相机；检查点从「模型产出」里选。评估会以真机运行策略，注意周围环境。
+          需要先连接主从臂与相机；检查点从「模型产出」里选。评估运行期间上方会自动轮询相机画面识别快递面单条码/二维码。
         </div>
       </form>
-    </details>
+    </div>
 
     <details class="card advanced-settings"><summary>已保存配置的评估命令</summary><pre class="command-preview" id="workflowCommand">正在生成…</pre></details>
     <div class="card">
@@ -45,8 +93,8 @@
       <div class="log" id="logPanel"></div>
     </div>
   </div>
-  <script src="/static/js/common.js?v=3.5.4-20261114-20-r2"></script>
-  <script src="/static/js/autosave.js?v=3.5.4-20261114-20-r2"></script>
-  <script src="/static/js/eval.js?v=3.5.4-20261114-20-r2"></script>
+  <script src="/static/js/common.js?v=3.5.4-20261114-20-r3"></script>
+  <script src="/static/js/autosave.js?v=3.5.4-20261114-20-r3"></script>
+  <script src="/static/js/eval.js?v=3.5.4-20261114-20-r3"></script>
 </body>
 </html>

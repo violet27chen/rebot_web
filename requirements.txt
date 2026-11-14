@@ -16,9 +16,10 @@ pyserial>=3.5
 websockets>=12.0        # WebSocket 日志流：训练 Loss / 终端输出实时推送，缺了会 404
 python-multipart>=0.0.9 # FastAPI 文件上传接口（导入后端时必需，缺了直接启动失败）
 
-# 摄像头真实 MJPEG 画面 / OpenCV 训练引擎（必需）
+# 摄像头真实 MJPEG 画面 / OpenCV 训练引擎 / 快递面单条码与二维码识别（必需）
 opencv-python>=4.8
 numpy>=1.24
+zxing-cpp>=2.2.0        # 快递单号一维条码 (Code128/Code39/EAN) 与二维码高速识别
 PyYAML>=6.0             # Official B601-DM hardware configuration for controlled shutdown
 
 # LeRobot 本体与硬件插件（按 Seeed 文档，由「环境安装」页面一键安装）

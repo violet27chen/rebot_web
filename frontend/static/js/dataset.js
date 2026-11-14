@@ -12,6 +12,7 @@
     });
     try {
       var c = await A.api.get("/api/config");
+      populateDsWaybillCameras(c.cameras || []);
       A.fillForm(f, c.dataset);
       A.el("vizRepo").value = c.viz.repo_id || c.dataset.repo_id || "";
       A.el("vizEp").value = c.viz.episode_index || 0;
@@ -21,6 +22,204 @@
       A.setAlert("#dsAlert", e.message, "err");
     }
   }
+
+  /* ---------------- 采集页：快递单号实时识别（条码 / 二维码） ---------------- */
+  var dsWaybillBusy = false;
+  var dsLastAnnouncedCode = "";
+  var dsLatestWaybill = null;
+
+  function populateDsWaybillCameras(cameras) {
+    var sel = A.el("dsWaybillCamSelect");
+    if (!sel) return;
+    var cur = sel.value || "all";
+    var opts = ['<option value="all">全部已配置相机（自动轮询）</option>'];
+    (cameras || []).forEach(function (c) {
+      var name = String(c.name || c.index_or_path || "");
+      var src = String(c.index_or_path !== undefined ? c.index_or_path : "");
+      opts.push('<option value="' + A.esc(name || src) + '">' +
+        A.esc(name + (src ? " (" + src + ")" : "")) + "</option>");
+    });
+    sel.innerHTML = opts.join("");
+    sel.value = cur;
+    if (!sel.value) sel.value = "all";
+  }
+
+  function updateModalWaybillUI() {
+    var mask = recModal.mask;
+    if (!mask) return;
+    var box = mask.querySelector("#recModalWaybillBox");
+    var txt = mask.querySelector("#recModalWaybillText");
+    var meta = mask.querySelector("#recModalWaybillMeta");
+    if (!box || !txt) return;
+    if (dsLatestWaybill && dsLatestWaybill.text) {
+      box.style.borderColor = "#16a34a";
+      box.style.background = "rgba(22,163,74,0.10)";
+      txt.textContent = "✅ 已识别到快递单号：" + dsLatestWaybill.text;
+      txt.style.color = "#15803d";
+      if (meta) {
+        meta.textContent = (dsLatestWaybill.type || "Barcode") + " · 相机：" +
+          (dsLatestWaybill.camera || "-") + " · " + (dsLatestWaybill.time || "");
+      }
+    } else {
+      box.style.borderColor = "var(--border,#e2e8f0)";
+      box.style.background = "var(--bg-subtle,rgba(148,163,184,0.06))";
+      txt.textContent = "📦 快递单号：正在扫描面单条码/二维码…";
+      txt.style.color = "";
+      if (meta) {
+        meta.textContent = "将快递面单朝向摄像头即可自动识别";
+      }
+    }
+  }
+
+  function renderDsWaybillState(data, isManual) {
+    if (!data) return;
+    dsLatestWaybill = data.latest || null;
+    var banner = A.el("dsWaybillBanner");
+    var labelEl = A.el("dsWaybillBannerLabel");
+    var codeEl = A.el("dsWaybillBannerCode");
+    var metaEl = A.el("dsWaybillBannerMeta");
+    var stateEl = A.el("dsWaybillScanState");
+    var tbody = A.q("#dsWaybillTable tbody");
+    var history = data.history || [];
+
+    if (dsLatestWaybill && dsLatestWaybill.text) {
+      if (banner) {
+        banner.style.borderColor = "#16a34a";
+        banner.style.background = "rgba(22,163,74,0.10)";
+      }
+      if (labelEl) {
+        labelEl.textContent = "✅ 已识别到快递单号";
+        labelEl.style.color = "#15803d";
+        labelEl.style.fontWeight = "600";
+      }
+      if (codeEl) {
+        codeEl.textContent = "已识别到快递单号：" + dsLatestWaybill.text;
+        codeEl.style.color = "#14532d";
+      }
+      if (metaEl) {
+        metaEl.innerHTML =
+          '<span class="badge ok">' + A.esc(dsLatestWaybill.type || "Barcode") + "</span> " +
+          '<span>相机：' + A.esc(dsLatestWaybill.camera || "-") + "</span> · " +
+          '<span>时间：' + A.esc(dsLatestWaybill.time || "-") + "</span>";
+      }
+    } else {
+      if (banner) {
+        banner.style.borderColor = "var(--border,#cbd5e1)";
+        banner.style.background = "var(--bg-subtle,rgba(148,163,184,0.08))";
+      }
+      if (labelEl) {
+        labelEl.textContent = "当前识别状态";
+        labelEl.style.color = "var(--muted,#64748b)";
+        labelEl.style.fontWeight = "400";
+      }
+      if (codeEl) {
+        codeEl.textContent = "等待识别快递单号…";
+        codeEl.style.color = "";
+      }
+      if (metaEl) {
+        metaEl.textContent = "采集时将快递面单朝向摄像头即可自动识别";
+      }
+    }
+
+    if (stateEl && data.scanned_cameras && data.scanned_cameras.length) {
+      var camSummary = data.scanned_cameras.map(function (sc) {
+        return sc.name + (sc.ok ? ("(清晰度 " + sc.sharpness + ")") : "(未就绪)");
+      }).join(" / ");
+      stateEl.textContent = "最近扫描：" + camSummary + " · 累计识别 " + history.length + " 单";
+    }
+
+    if (tbody) {
+      if (!history.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="muted">暂无已识别单号，开始采集或点击「立即扫描单号」即可识别</td></tr>';
+      } else {
+        tbody.innerHTML = history.map(function (item, idx) {
+          return "<tr>" +
+            "<td>" + (idx + 1) + "</td>" +
+            '<td><strong style="color:#15803d;font-size:14px">已识别到快递单号：<code>' + A.esc(item.text) + "</code></strong></td>" +
+            '<td><span class="badge ok">' + A.esc(item.type || "Barcode") + "</span></td>" +
+            "<td>" + A.esc(item.camera || "-") + "</td>" +
+            '<td class="muted">' + A.esc(item.time || "-") + "</td>" +
+          "</tr>";
+        }).join("");
+      }
+    }
+
+    updateModalWaybillUI();
+
+    var newCodes = data.new_codes || [];
+    if (newCodes.length) {
+      var firstNew = newCodes[0];
+      if (firstNew.text && firstNew.text !== dsLastAnnouncedCode) {
+        dsLastAnnouncedCode = firstNew.text;
+        A.toast("已识别到快递单号：" + firstNew.text + "（" + (firstNew.camera || "相机") + "）", "ok");
+      }
+    } else if (isManual) {
+      if (data.found && data.codes && data.codes.length) {
+        A.toast("已识别到快递单号：" + data.codes[0].text, "ok");
+      } else if (data.error) {
+        A.toast("扫码未成功：" + data.error, "warn");
+      } else {
+        A.toast("当前画面未检测到面单条码/二维码，请调整包裹位置或清晰度", "info");
+      }
+    }
+  }
+
+  async function scanDsWaybillOnce(isManual) {
+    if (dsWaybillBusy) return;
+    dsWaybillBusy = true;
+    var btn = A.el("btnDsScanWaybill");
+    var mBtn = recModal.mask && recModal.mask.querySelector("#recModalScanBtn");
+    if (isManual) {
+      if (btn) { btn.disabled = true; btn.textContent = "正在扫描…"; }
+      if (mBtn) { mBtn.disabled = true; mBtn.textContent = "扫描中…"; }
+    }
+    try {
+      var camSel = A.el("dsWaybillCamSelect");
+      var cam = (camSel && camSel.value) || "all";
+      var r = await A.api.post("/api/waybill/scan", { camera: cam });
+      renderDsWaybillState(r, isManual);
+    } catch (e) {
+      if (isManual) A.toast("扫描失败：" + e.message, "err");
+    } finally {
+      dsWaybillBusy = false;
+      if (isManual) {
+        if (btn) { btn.disabled = false; btn.textContent = "立即扫描单号"; }
+        if (mBtn) { mBtn.disabled = false; mBtn.textContent = "立即扫码"; }
+      }
+    }
+  }
+
+  async function loadDsWaybillHistory() {
+    try {
+      var r = await A.api.get("/api/waybill/history");
+      renderDsWaybillState(r, false);
+    } catch (e) { /* ignore */ }
+  }
+
+  if (A.el("btnDsScanWaybill")) {
+    A.click("btnDsScanWaybill", function () { scanDsWaybillOnce(true); });
+  }
+  if (A.el("btnDsClearWaybill")) {
+    A.click("btnDsClearWaybill", function () {
+      A.action(async function () {
+        var r = await A.api.post("/api/waybill/clear", {});
+        dsLastAnnouncedCode = "";
+        renderDsWaybillState(r, false);
+        A.ok("已清空快递单号识别记录", "#dsAlert");
+      }, "#dsAlert");
+    });
+  }
+
+  var dsWaybillTimer = setInterval(function () {
+    if (document.hidden) return;
+    var autoRec = A.el("chkDsAutoScanWaybill") && A.el("chkDsAutoScanWaybill").checked;
+    var autoIdle = A.el("chkDsIdleScanWaybill") && A.el("chkDsIdleScanWaybill").checked;
+    var st = A.status();
+    var isRunning = Boolean(recModal.active || (st && st.running && st.job && st.job.kind === "record"));
+    if ((isRunning && autoRec) || autoIdle) {
+      scanDsWaybillOnce(false);
+    }
+  }, 1200);
 
   var cachedDatasets = [];
 
@@ -196,6 +395,13 @@
               '<div id="recResetSub" style="font-size:12px;color:var(--muted,#64748b);margin-top:4px">重置时长 10s</div>' +
             '</div>' +
           '</div>' +
+          '<div id="recModalWaybillBox" style="border:1.5px solid var(--border,#e2e8f0);border-radius:8px;padding:8px 12px;margin:8px 0;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;background:var(--bg-subtle,rgba(148,163,184,0.06))">' +
+            '<div style="min-width:0;flex:1">' +
+              '<div id="recModalWaybillText" style="font-weight:700;font-size:14px;word-break:break-all">📦 快递单号：正在扫描面单条码/二维码…</div>' +
+              '<div id="recModalWaybillMeta" class="muted" style="font-size:11.5px;margin-top:2px">将快递面单朝向摄像头即可自动识别</div>' +
+            '</div>' +
+            '<button type="button" class="btn subtle sm" id="recModalScanBtn">立即扫码</button>' +
+          '</div>' +
           '<div class="fb-bar" style="height:8px;border-radius:4px;overflow:hidden;margin:10px 0"><i id="recModalBar" style="display:block;height:100%;width:0%;background:var(--primary,#2563eb);transition:width .25s"></i></div>' +
           '<div id="recModalHint" class="note" style="margin-top:8px;font-size:12.5px">正在连接主从臂与摄像头，请稍候…</div>' +
         '</div>' +
@@ -211,6 +417,11 @@
       '</div>';
     A.modalHost().appendChild(mask);
     recModal.mask = mask;
+    var scanBtn = mask.querySelector("#recModalScanBtn");
+    if (scanBtn) {
+      scanBtn.addEventListener("click", function () { scanDsWaybillOnce(true); });
+    }
+    updateModalWaybillUI();
 
     Array.from(mask.querySelectorAll("[data-rec-key]")).forEach(function (b) {
       b.addEventListener("click", async function () {
@@ -663,9 +874,13 @@
     }
   });
 
-  window.addEventListener("pagehide", function () { closeRecordModal(); });
+  window.addEventListener("pagehide", function () {
+    clearInterval(dsWaybillTimer);
+    closeRecordModal();
+  });
 
   await loadConfig();
+  await loadDsWaybillHistory();
   var initSt = A.status();
   if (initSt && initSt.running && initSt.job && initSt.job.kind === "record") {
     openRecordModal();

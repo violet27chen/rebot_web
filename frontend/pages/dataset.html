@@ -45,6 +45,52 @@
         <button class="btn subtle" id="keyLeft">← 重录本集</button>
         <button class="btn danger" id="keyEsc">ESC 结束会话</button>
       </div>
+      <hr>
+      <div class="card-h">
+        <h2 style="font-size:14px">快递单号实时识别（采集同步扫码）</h2>
+        <span class="sub" id="dsWaybillScanState">采集过程中自动通过摄像头识别面单条码 / 二维码</span>
+      </div>
+      <div id="dsWaybillBanner" style="border:2px solid var(--border,#cbd5e1);border-radius:10px;padding:12px 16px;background:var(--bg-subtle,rgba(148,163,184,0.08));display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+        <div>
+          <div style="font-size:12px;color:var(--muted,#64748b);margin-bottom:2px" id="dsWaybillBannerLabel">当前识别状态</div>
+          <div style="font-size:19px;font-weight:700;word-break:break-all" id="dsWaybillBannerCode">等待识别快递单号…</div>
+        </div>
+        <div id="dsWaybillBannerMeta" class="muted" style="font-size:12.5px;text-align:right">采集时将快递面单朝向摄像头即可自动识别</div>
+      </div>
+      <div class="row" style="margin-top:10px;align-items:flex-end;gap:10px;flex-wrap:wrap">
+        <div class="field" style="min-width:200px">
+          <label for="dsWaybillCamSelect">扫码相机源</label>
+          <select id="dsWaybillCamSelect">
+            <option value="all">全部已配置相机（自动轮询）</option>
+          </select>
+        </div>
+        <div class="btn-row">
+          <button class="btn primary" type="button" id="btnDsScanWaybill">立即扫描单号</button>
+          <button class="btn subtle" type="button" id="btnDsClearWaybill">清空记录</button>
+        </div>
+        <label class="check" style="margin-bottom:6px">
+          <input type="checkbox" id="chkDsAutoScanWaybill" checked> 采集数据时自动连续扫码
+        </label>
+        <label class="check" style="margin-bottom:6px">
+          <input type="checkbox" id="chkDsIdleScanWaybill"> 空闲时也保持实时扫码
+        </label>
+      </div>
+      <div class="scroll" style="margin-top:10px;max-height:180px">
+        <table class="table" id="dsWaybillTable">
+          <thead>
+            <tr>
+              <th style="width:52px">#</th>
+              <th>已识别到快递单号</th>
+              <th style="width:110px">条码类型</th>
+              <th style="width:130px">识别相机</th>
+              <th style="width:100px">识别时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td colspan="5" class="muted">暂无已识别单号，开始采集或点击「立即扫描单号」即可识别</td></tr>
+          </tbody>
+        </table>
+      </div>
     </div>
 
     <div class="card">
@@ -118,9 +164,9 @@
     <iframe id="camDockFrame" src="about:blank" title="摄像头画面"></iframe>
   </div>
 
-  <script src="/static/js/common.js?v=3.5.4-20261114-20-r2"></script>
-  <script src="/static/js/autosave.js?v=3.5.4-20261114-20-r2"></script>
-  <script src="/static/js/dataset.js?v=3.5.4-20261114-20-r2"></script>
-  <script src="/static/js/collection-plan.js?v=3.5.4-20261114-20-r2"></script>
+  <script src="/static/js/common.js?v=3.5.4-20261114-20-r3"></script>
+  <script src="/static/js/autosave.js?v=3.5.4-20261114-20-r3"></script>
+  <script src="/static/js/dataset.js?v=3.5.4-20261114-20-r3"></script>
+  <script src="/static/js/collection-plan.js?v=3.5.4-20261114-20-r3"></script>
 </body>
 </html>
