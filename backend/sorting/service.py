@@ -353,6 +353,93 @@ class SortingService:
         self.save({'skills':skills})
         return {'skills':skills,'found_checkpoint':bool(ckpt),'found_dataset_info':bool(ds_info)}
 
+    def upsert_skill(self,p):
+        """通过下拉选择（类别、用途、从臂、检查点、数据集、时长）一键新增或更新技能，其余几何/相机/姿态参数由系统自动补全。"""
+        s=self.settings();c=s['calibration'];cal_id=fingerprint(c);cfg_all=self.h.load_config()
+        cls_name=str(p.get('class_name') or '').strip()
+        if not cls_name:raise SortingError('请选择或填写 YOLO 类别名（如 bag 或 box）')
+        role=str(p.get('role') or 'flip').strip()
+        if role not in ('flip','act'):raise SortingError('技能用途只能是 flip 或 act')
+        arm=str(p.get('arm') or 'right').strip()
+        if arm not in ('left','right'):raise SortingError('请选择左臂或右臂')
+        duration_s=float(p.get('duration_s') or 8.0)
+        ckpt_raw=str(p.get('checkpoint') or '').strip()
+        ds_repo=str(p.get('dataset_repo') or '').strip()
+        lerobot_home=Path.home()/'.cache/huggingface/lerobot'
+        ds_info_path=''
+        if ds_repo:
+            cand_info=Path(ds_repo) if Path(ds_repo).is_absolute() else (lerobot_home/ds_repo/'meta/info.json')
+            if cand_info.is_file():ds_info_path=str(cand_info)
+        if not ds_info_path:
+            for ic in sorted(lerobot_home.rglob('meta/info.json'),key=lambda x:x.stat().st_mtime,reverse=True) if lerobot_home.is_dir() else []:
+                try:
+                    ji=json.loads(ic.read_text())
+                    if len(((ji.get('features') or {}).get('observation.state') or {}).get('names') or [])==14:
+                        ds_info_path=str(ic);break
+                except Exception:pass
+        ckpt_path=''
+        ckpt_cfg={}
+        if ckpt_raw:
+            cp=Path(ckpt_raw) if Path(ckpt_raw).is_absolute() else (self.h.root/ckpt_raw)
+            if cp.is_file() and cp.name=='config.json':cp=cp.parent
+            ckpt_path=str(cp)
+            if (cp/'config.json').is_file():
+                try:ckpt_cfg=json.loads((cp/'config.json').read_text())
+                except Exception:pass
+        cams=cfg_all.get('cameras') or []
+        by_name={str(cm.get('name','')):str(cm.get('index_or_path','')) for cm in cams if cm.get('index_or_path')}
+        first_cam=next(iter(by_name.values()),str(s.get('camera_source') or '0'))
+        cam_map={}
+        visual_keys=[k for k in (ckpt_cfg.get('input_features') or {}) if k.startswith('observation.images.')]
+        if not visual_keys:visual_keys=['observation.images.top']
+        for vk in visual_keys:
+            short=vk.replace('observation.images.','').replace('left_','').replace('right_','')
+            cam_map[vk]=by_name.get(short) or (s.get('camera_source') if '深度' in short or 'top' in short else None) or first_cam
+        try:start_pose=[round(float(x),4) for x in self.h.measured()]
+        except Exception:start_pose=[0.0]*14
+        cyc=s.get('cycle') or {}
+        rpys=cyc.get('approach_rpy') or {'left':[0.0,1.45,0.0],'right':[0.0,1.45,0.0]}
+        w_bounds=c.get('workspace_bounds') or [[-0.45,0.45],[-0.45,0.45],[-0.03,0.38]]
+        task_str=str(p.get('task') or (cfg_all.get('dataset') or {}).get('single_task') or f'{role} {cls_name}').strip()
+        entry={
+            'name':str(p.get('name') or f'{role}_{cls_name}'),
+            'class_name':cls_name,
+            'role':role,
+            'enabled':bool(p.get('enabled',True)) and bool(ckpt_path and ds_info_path),
+            'arm':arm,
+            'checkpoint':ckpt_path or '/请先训练ACT模型',
+            'dataset_info':ds_info_path or '/请先录制14维双臂数据集',
+            'calibration_id':cal_id,
+            'training_bounds':w_bounds,
+            'start_pose_rad':start_pose,
+            'start_tolerance_rad':0.25,
+            'approach_rpy':rpys,
+            'camera_map':cam_map,
+            'task':task_str,
+            'duration_s':duration_s
+        }
+        skills=[x for x in (s.get('skills') or []) if not (x.get('class_name')==cls_name and x.get('role','act')==role)]
+        skills.append(entry)
+        self.save({'skills':skills})
+        return {'skills':skills,'entry':entry}
+
+    def sync_skills(self):
+        """一键将所有已登记技能的标定版本（calibration_id）、工作区范围、接近姿态及当前实测起始关节角同步到最新状态。"""
+        s=self.settings();c=s['calibration'];cal_id=fingerprint(c)
+        cyc=s.get('cycle') or {}
+        rpys=cyc.get('approach_rpy') or {'left':[0.0,1.45,0.0],'right':[0.0,1.45,0.0]}
+        w_bounds=c.get('workspace_bounds') or [[-0.45,0.45],[-0.45,0.45],[-0.03,0.38]]
+        try:pose=[round(float(x),4) for x in self.h.measured()]
+        except Exception:pose=None
+        skills=copy.deepcopy(s.get('skills') or [])
+        for sk in skills:
+            sk['calibration_id']=cal_id
+            sk['training_bounds']=w_bounds
+            sk['approach_rpy']=rpys
+            if pose is not None:sk['start_pose_rad']=pose
+        self.save({'skills':skills})
+        return {'skills':skills,'pose_updated':pose is not None}
+
     def solve(self,kind):
         c=self.settings()['calibration'];points=c.get('points') or []
         if kind=='alignment':

@@ -56,6 +56,10 @@ def attach(app,h):
         classes=p.get('class_names') or ['bag','box']
         role=p.get('role') or 'flip'
         return {'ok':True,**service.autofill_skills(classes,role)}
+    @router.post('/skills/upsert')
+    def skills_upsert(p:dict=Body(default={})):return {'ok':True,**service.upsert_skill(p)}
+    @router.post('/skills/sync')
+    def skills_sync():return {'ok':True,**service.sync_skills()}
     @router.post('/calibration/board')
     def board(p:dict=Body(...)):
         return {'ok':True,**service.board(p['frame_id'],int(p['columns']),int(p['rows']),float(p['square_m']))}

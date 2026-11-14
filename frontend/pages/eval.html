@@ -43,8 +43,33 @@
       <div class="alert" id="sortingAlert" role="alert"></div>
       <p class="note" id="sortingRequirements">正在核对标定和技能配置…</p>
       <div id="sortingConfig"><div class="row"><div class="field"><label for="sortingYolo">包裹 YOLO 检测模型（本地 .pt）</label><input id="sortingYolo" placeholder="/绝对路径/parcel_best.pt"></div><div class="field"><label for="sortingDevice">推理设备</label><select id="sortingDevice"><option value="cuda">CUDA</option><option value="cpu">CPU</option></select></div><div class="field"><label for="sortingConfidence">检测置信度</label><input id="sortingConfidence" type="number" min="0.1" max="0.99" step="0.05" value="0.6"></div><div class="field"><label for="sortingUseDepth">视觉三维定位模式</label><select id="sortingUseDepth"><option value="true">RGB-D 深度点云定位（推荐）</option><option value="false">纯 RGB 桌面平面几何定位（免深度相机）</option></select></div><div class="field narrow"><label for="sortingDefaultHeight">纯RGB默认包裹高(m)</label><input id="sortingDefaultHeight" type="number" min="0.005" max="0.35" step="0.005" value="0.035"></div></div>
-      <details class="advanced-settings"><summary>独立 ACT 技能登记</summary><p class="hint">每个 YOLO 类别唯一对应一个已独立训练的 14 维 ACT；需声明真实训练区域、实测起始姿态和训练相机映射。变更标定后须重新核对，不能只改版本号绕过适用范围。</p><div class="btn-row"><button class="btn primary sm" id="sortingAutoSkill" type="button">一键自动生成/填入当前技能配置</button><button class="btn subtle sm" id="sortingTemplate" type="button">查看登记模板</button><span class="hint" id="sortingCalibId"></span></div><div class="field"><label for="sortingSkills">技能清单（JSON 数组，自动保存）</label><textarea id="sortingSkills" rows="12" spellcheck="false">[]</textarea></div></details>
-      <details class="advanced-settings"><summary>控制边界与双臂防撞保护 · 未填写时禁止执行</summary><p class="hint">顺序为左臂 1–7、右臂 1–7；使用原始电机弧度和 Nm。运行期间 50Hz 实时监测双臂全连杆三维间距及外部碰撞力矩，一旦过近或碰撞立即卸除推进力并转为重力补偿保持。</p><div class="row"><div class="field"><label for="sortingTorque">14 个电机力矩上限（JSON 数组，Nm）</label><textarea id="sortingTorque" rows="3" placeholder="填写 14 个经确认的正数"></textarea></div><div class="field"><label for="sortingLimits">14 组原始关节限位（JSON 二维数组，rad）</label><textarea id="sortingLimits" rows="3" placeholder="每项为 [下限,上限]"></textarea></div></div><div class="row"><div class="field"><label for="sortingVelocity">最大关节速度（rad/s）</label><input id="sortingVelocity" type="number" min="0.01" max="0.5" step="0.01" value="0.25"></div><div class="field"><label for="sortingClearance">接近净空（米）</label><input id="sortingClearance" type="number" min="0.05" max="0.3" step="0.01" value="0.1"></div><div class="field"><label for="sortingPush">单次推拢上限（米）</label><input id="sortingPush" type="number" min="0.01" max="0.2" step="0.01" value="0.12"></div><div class="field"><label for="sortingMinArmDist">双臂防撞间距（米）</label><input id="sortingMinArmDist" type="number" min="0.08" max="0.35" step="0.01" value="0.12"></div></div></details>
+      <details class="advanced-settings" open><summary>独立 ACT 技能登记（点选即可，无需手写 JSON）</summary>
+        <p class="hint">若只用「持续分拣清桌 / 悬停扫码 / 向左推走」，无需配置此项即可直接运行；当包裹面单朝下需要调用训练好的 ACT 模型翻面或抓取时，在下方下拉框选择并点击「添加/更新技能」即可自动读取标定、相机与当前真机姿态。</p>
+        <div class="row" style="margin-top:8px">
+          <div class="field narrow"><label for="skClass">包裹类别</label><select id="skClass"><option value="bag">bag（快递袋）</option><option value="box">box（快递纸箱）</option><option value="parcel">parcel（通用包裹）</option></select></div>
+          <div class="field"><label for="skRole">技能动作用途</label><select id="skRole"><option value="flip">flip · 面单朝下时翻面</option><option value="act">act · 直接执行 ACT 技能</option></select></div>
+          <div class="field narrow"><label for="skArm">主动从臂</label><select id="skArm"><option value="right">右从臂 (right)</option><option value="left">左从臂 (left)</option></select></div>
+          <div class="field narrow"><label for="skDuration">时长(秒)</label><input id="skDuration" type="number" min="1" max="30" value="8"></div>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <div class="field wide"><label for="skCkpt">选择已训练 ACT 模型检查点</label><select id="skCkpt"><option value="">（正在扫描本机已训练模型…）</option></select></div>
+          <div class="field wide"><label for="skDataset">选择对应训练数据集（自动匹配关节顺序与任务）</label><select id="skDataset"><option value="">（正在扫描已录制数据集…）</option></select></div>
+        </div>
+        <div class="btn-row" style="margin-top:10px">
+          <button class="btn primary sm" id="btnSkillUpsert" type="button">＋ 添加 / 更新该类别技能</button>
+          <button class="btn subtle sm" id="sortingAutoSkill" type="button">一键自动生成全套默认技能</button>
+          <button class="btn subtle sm" id="btnSkillSync" type="button">同步当前标定与真机起始姿态</button>
+          <span class="hint" id="sortingCalibId"></span>
+        </div>
+        <div class="table-wrap" style="margin-top:10px">
+          <table>
+            <thead><tr><th>启用</th><th>类别 / 名称</th><th>用途</th><th>从臂</th><th>ACT 模型 / 数据集</th><th>时长</th><th>操作</th></tr></thead>
+            <tbody id="skillTableBody"><tr><td colspan="7" class="muted">暂无登记技能（规则悬停扫码与向左推走可直接运行）</td></tr></tbody>
+          </table>
+        </div>
+        <details style="margin-top:8px"><summary class="hint" style="cursor:pointer">高级：查看底层技能 JSON（自动同步，无需手填）</summary><div class="btn-row" style="margin:6px 0"><button class="btn subtle sm" id="sortingTemplate" type="button">查看登记模板</button></div><div class="field"><textarea id="sortingSkills" rows="6" spellcheck="false">[]</textarea></div></details>
+      </details>
+      <details class="advanced-settings"><summary>控制边界与双臂防撞保护 · 已自动填入安全默认值</summary><p class="hint">顺序为左臂 1–7、右臂 1–7；运行期间 50Hz 实时监测双臂全连杆三维间距及外部碰撞力矩，一旦过近或碰撞立即卸除推进力并转为重力补偿保持。</p><div class="btn-row" style="margin-bottom:8px"><button class="btn subtle sm" id="btnFillDefaultSafety" type="button">一键填入 B601-DM 推荐安全力矩与关节限位</button></div><div class="row"><div class="field"><label for="sortingTorque">14 个电机力矩上限（JSON 数组，Nm）</label><textarea id="sortingTorque" rows="2" placeholder="填写 14 个经确认的正数"></textarea></div><div class="field"><label for="sortingLimits">14 组原始关节限位（JSON 二维数组，rad）</label><textarea id="sortingLimits" rows="2" placeholder="每项为 [下限,上限]"></textarea></div></div><div class="row"><div class="field"><label for="sortingVelocity">最大关节速度（rad/s）</label><input id="sortingVelocity" type="number" min="0.01" max="0.5" step="0.01" value="0.25"></div><div class="field"><label for="sortingClearance">接近净空（米）</label><input id="sortingClearance" type="number" min="0.05" max="0.3" step="0.01" value="0.1"></div><div class="field"><label for="sortingPush">单次推拢上限（米）</label><input id="sortingPush" type="number" min="0.01" max="0.2" step="0.01" value="0.12"></div><div class="field"><label for="sortingMinArmDist">双臂防撞间距（米）</label><input id="sortingMinArmDist" type="number" min="0.08" max="0.35" step="0.01" value="0.12"></div></div></details>
       <details class="advanced-settings" open><summary>持续分拣与腕部扫码配置（面单朝上 → 向左推走）</summary><div class="row"><div class="field"><label for="sortingAction">预演/执行动作模式</label><select id="sortingAction"><option value="cycle">持续分拣清桌（悬停扫码 → 翻面 → 向左推走 → 循环清空）</option><option value="inspect">仅单步：悬停到包裹上方（爪头朝下）</option><option value="push_left">仅单步：双臂配合向左推走</option><option value="">旧版：按类别单次规则推拢 + ACT</option></select></div><div class="field"><label for="sortingCycleArm">主动从臂选择</label><select id="sortingCycleArm"><option value="auto">自动（选离包裹更近的一臂）</option><option value="left">固定左从臂</option><option value="right">固定右从臂</option></select></div><div class="field"><label for="sortingLeftDir">向左方向向量 [X,Y,Z]</label><input id="sortingLeftDir" value="[-1, 0, 0]"></div></div><div class="btn-row"><button class="btn subtle sm" id="sortingScanLeft" type="button">测试左腕相机扫码</button><button class="btn subtle sm" id="sortingScanRight" type="button">测试右腕相机扫码</button><button class="btn subtle sm" id="sortingScanTop" type="button">测试俯视相机扫码</button><span class="hint" id="sortingScanResult">尚未扫码</span></div></details></div>
       <div class="btn-row"><button class="btn primary" id="sortingDetect" type="button">检测包裹与高度</button><button class="btn" id="sortingPlan" type="button" disabled>预演所选目标</button><button class="btn primary" id="sortingExecute" type="button" disabled>确认并执行</button><button class="btn danger" id="sortingStop" type="button">停止当前任务</button></div>
       <p class="hint" id="sortingProgress" aria-live="polite">检测与预演不驱动电机；执行需要二次确认。完成后从顶部收工归零并失能。</p>
@@ -61,7 +86,7 @@
   </div>
   <script src="/static/js/common.js?v=3.5.0-20261114-7"></script>
   <script src="/static/js/autosave.js?v=3.4.1-20261114-2"></script>
-  <script src="/static/js/sorting-console.js?v=3.5.0-20261114-8"></script>
+  <script src="/static/js/sorting-console.js?v=3.5.0-20261114-9"></script>
   <script src="/static/js/eval.js?v=3.4.1-20261114-2"></script>
 </body>
 </html>
