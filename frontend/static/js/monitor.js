@@ -3,7 +3,7 @@
   'use strict';
   var A=window.APP,panel,config={},streams=new Map(),world,latest={},paused=false,socket,retry;
   var preview={dialog:null,kind:null,record:null,frame:0,home:null,placeholder:null,returnFocus:null};
-  var geometryBinding,dual=false,modelError='';
+  var geometryBinding,dual=false,modelError='',bindings={},bindingGeneration=0,bindingSignature='',serverOffset=0;
   function canonical(source){var s=String(source);return /^\d+$/.test(s)?'/dev/video'+Number(s):s;}
   function image(source){var r=streams.get(canonical(source));return r&&r.box.dataset.live==='true'&&r.img;}
   function stop(record){record.open=false;clearTimeout(record.timer);record.img.removeAttribute('src');record.box.dataset.live='false';record.note.textContent=paused?'设备已断开':'预览已暂停';}
@@ -16,7 +16,7 @@
   }
   function setPaused(value){paused=!!value;panel.classList.toggle('devices-paused',paused);A.el('monitorResume').hidden=!paused;
     streams.forEach(function(r){if(paused)stop(r);else if(!r.img.getAttribute('src'))start(r);});
-    if(paused)Object.keys(latest).forEach(function(side){latest[side]=null;});
+    if(paused)Object.keys(latest).forEach(resetArm);
   }
   function setupPreview(){
     var dialog=document.createElement('dialog');dialog.id='monitorPreview';dialog.className='monitor-preview-dialog';dialog.setAttribute('aria-labelledby','monitorPreviewTitle');
@@ -107,9 +107,32 @@
     A.el('monitorGeometryForm').addEventListener('input',function(){var geometry=layoutWorld(readGeometry().monitor_layout);A.el('monitorGeometryState').textContent=geometry.distance_mm===null?'等待完整位置数据；输入会自动保存。':'计算中心距 '+geometry.distance_mm.toFixed(1)+' mm · 正在自动保存…';});
     A.el('monitorGeometryMode').addEventListener('change',function(){layoutWorld(readGeometry().monitor_layout);});
   }
+  function desiredPorts(){
+    var d=config.dual_arm||{};
+    return dual?{left:(d.left||{}).follower_port||'',right:(d.right||{}).follower_port||''}:{left:(config.follower||{}).port||''};
+  }
+  function configuredPort(side){var desired=desiredPorts(),b=bindings[side];return b&&b.port===desired[side]?b.canonical_port:desired[side]||'';}
+  function resetArm(side){latest[side]=null;if(world&&world.clear)world.clear(side);}
+  function bindModels(){
+    var desired=desiredPorts();['left','right'].forEach(function(side){
+      var name=side==='left'?(dual?'左从臂':'从臂'):'右从臂',port=configuredPort(side),node=A.el('modelPort'+side);
+      A.el('modelLabel'+side).textContent=name;node.textContent=desired[side]?(port===desired[side]?port:desired[side]+' → '+port):'未设置串口';node.title=node.textContent;
+      if(world&&world.bind)world.bind(side,{label:name,port:desired[side]||'',canonical_port:port});
+    });
+  }
+  function acceptBindings(packet){
+    if(typeof packet.time==='number')serverOffset=packet.time*1000-Date.now();
+    if(typeof packet.server_time==='number')serverOffset=packet.server_time*1000-Date.now();
+    if(!packet.bindings)return;
+    var generation=packet.binding_generation||0;if(generation<bindingGeneration)return;
+    if(generation!==bindingGeneration){['left','right'].forEach(resetArm);bindingGeneration=generation;}
+    bindings=packet.bindings;bindModels();
+  }
   function configure(next){
     config=next;dual=!!(next.dual_arm||{}).enabled;A.el('modelRightStatus').hidden=!dual;
-    ['left','right'].forEach(function(side){var arm=dual?((next.dual_arm||{})[side]||{}):(next.follower||{});A.el('modelLabel'+side).textContent=side==='left'?(dual?'左从臂':'从臂'):'右从臂';A.el('modelPort'+side).textContent=arm.follower_port||arm.port||'未设置串口';});
+    var signature=JSON.stringify([dual,desiredPorts()]);
+    if(signature!==bindingSignature){bindingSignature=signature;['left','right'].forEach(resetArm);}
+    bindModels();
     if(!geometryBinding)applyGeometry(next);else layoutWorld(readGeometry().monitor_layout);
     var wanted=new Set(),grid=A.el('monitorFeeds');
     (next.cameras||[]).forEach(function(c){var id=canonical(c.index_or_path);wanted.add(id);var signature=JSON.stringify([c.index_or_path,c.width,c.height,c.fps,c.fourcc]),record=streams.get(id);
@@ -119,23 +142,30 @@
     wanted.add('@depth');streams.forEach(function(record,id){if(!wanted.has(id)){if(preview.record===record)preview.dialog.close();stop(record);record.box.remove();streams.delete(id);}});
     if(!streams.has('@depth')){var d=tile('@depth','深度相机 · Depth','@depth','/api/depth/stream?view=color');streams.set('@depth',d);grid.appendChild(d.box);start(d);}
   }
-  function applyArm(arm){if(!arm||!world)return;latest[arm.side]=arm;world.set(arm.side,arm.joints);}
-  function connect(){socket=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws/monitor');socket.onopen=function(){A.el('monitorConnection').textContent='反馈已连接';};
+  function applyArm(arm){
+    if(!arm||!world||paused||!Array.isArray(arm.joints)||arm.joints.length!==6||!arm.joints.every(function(q){return typeof q==='number'&&Number.isFinite(q);})||typeof arm.timestamp!=='number'||!Number.isFinite(arm.timestamp))return;
+    if(arm.binding_generation&&arm.binding_generation<bindingGeneration)return;
+    var port=String(arm.port||''),desired=desiredPorts(),matches=Object.keys(desired).filter(function(side){return desired[side]&&configuredPort(side)===port;});
+    if(matches.length!==1)return;
+    var side=matches[0],previous=latest[side];if(previous&&previous.timestamp>arm.timestamp)return;
+    var routed=Object.assign({},arm,{side:side});latest[side]=routed;world.set(side,routed.joints);
+  }
+  function connect(){socket=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws/monitor');socket.onopen=function(){bindingGeneration=0;bindings={};['left','right'].forEach(resetArm);bindModels();A.el('monitorConnection').textContent='反馈已连接';};
     socket.onmessage=function(event){var p=JSON.parse(event.data);
-      if(p.type==='snapshot'){setPaused(p.released||p.paused);Object.values(p.arms||{}).forEach(applyArm);}if(p.type==='feedback')applyArm(p.arm);if(p.type==='device-session')setPaused(p.paused);
-      if(p.type==='health'){A.el('monitorConnection').textContent='v3.3.0 · '+(p.cameras&&p.cameras.capture_pid?'共享视觉 PID '+p.cameras.capture_pid:'视觉服务待机');if(paused!==!!p.released)setPaused(p.released);
+      acceptBindings(p);if(p.type==='snapshot'){setPaused(p.released||p.paused);['left','right'].forEach(resetArm);Object.values(p.arms||{}).forEach(applyArm);}if(p.type==='feedback')applyArm(p.arm);if(p.type==='device-session')setPaused(p.paused);
+      if(p.type==='health'){A.el('monitorConnection').textContent=p.cameras&&p.cameras.capture_pid?'共享视觉 PID '+p.cameras.capture_pid:'视觉服务待机';if(paused!==!!p.released)setPaused(p.released);
         (p.cameras&&p.cameras.sessions||[]).forEach(function(s){var r=streams.get(canonical(s.source))||streams.get(canonical(s.device));if(r&&r.open&&(s.error||!s.active||s.age_ms>2000))r.img.onerror();});if(p.depth&&p.depth.error){var d=streams.get('@depth');if(d)d.note.textContent=p.depth.error;}}
     };socket.onclose=function(){A.el('monitorConnection').textContent='反馈离线 · 正在重连';clearTimeout(retry);retry=setTimeout(connect,1500);};
   }
   async function mount(){
     panel=document.createElement('aside');panel.className='persistent-monitor';panel.setAttribute('aria-label','常驻设备监视');panel.innerHTML='<header class="monitor-heading"><div><h2>实时监视</h2><span id="monitorConnection">连接反馈中…</span></div><button class="btn sm" id="monitorResume" hidden>恢复监视</button></header><section class="monitor-world"><header><strong id="monitorModeLabel">官方模型</strong><button class="btn subtle sm" id="monitorLayoutButton" type="button">基座位置</button></header><div class="monitor-world-canvas"><canvas id="monitorArmScene" tabindex="0" role="button" aria-label="放大机械臂官方模型场景"></canvas><span class="monitor-world-expand" aria-hidden="true">点击放大 ↗</span></div><div class="monitor-arm-status"><div id="modelLeftStatus"><strong id="modelLabelleft">从臂</strong><span id="modelStateleft">等待反馈</span><small id="modelPortleft"></small></div><div id="modelRightStatus"><strong id="modelLabelright">右从臂</strong><span id="modelStateright">等待反馈</span><small id="modelPortright"></small></div></div><div id="monitorBaseline" class="monitor-layout"></div></section><div id="monitorFeeds" class="monitor-feeds"></div><div class="monitor-footnote">点击任意画面放大。模型随实测反馈更新；断流标记过期。</div>';
     A.q('.app').appendChild(panel);setupPreview();setupGeometry();
-    try{world=window.ARM3D.initWorkspace('monitorArmScene','/static/arm_urdf/reBot-DevArm_fixend.urdf');if(world){world.onLoad(function(){Object.values(latest).forEach(applyArm);layoutWorld(readGeometry().monitor_layout);});world.onError(function(text){modelError=text;A.el('monitorBaseline').textContent=text;});}}catch(error){A.el('monitorBaseline').textContent='3D 不可用：'+error.message;}
+    try{world=window.ARM3D.initWorkspace('monitorArmScene','/static/arm_urdf/reBot-DevArm_fixend.urdf');if(world){world.onLoad(function(){bindModels();Object.values(latest).forEach(applyArm);layoutWorld(readGeometry().monitor_layout);});world.onError(function(text){modelError=text;A.el('monitorBaseline').textContent=text;});}}catch(error){A.el('monitorBaseline').textContent='3D 不可用：'+error.message;}
     var sceneCanvas=A.el('monitorArmScene'),down=null,moved=false;
     sceneCanvas.addEventListener('pointerdown',function(e){down=[e.clientX,e.clientY];moved=false;});sceneCanvas.addEventListener('pointermove',function(e){if(down&&Math.hypot(e.clientX-down[0],e.clientY-down[1])>5)moved=true;});sceneCanvas.addEventListener('click',function(){if(!moved&&preview.kind!=='model')openModel();down=null;});sceneCanvas.addEventListener('keydown',function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();openModel();}});
     A.el('monitorResume').onclick=function(){A.action(async function(){await A.api.post('/api/devices/resume',{});setPaused(false);});};
-    setInterval(function(){['left','right'].forEach(function(side){var arm=latest[side],node=A.el('modelState'+side),age=arm?Math.max(0,Date.now()-arm.timestamp*1000):null;node.textContent=paused?'已断开':age===null?'等待实测反馈':age>1200?'反馈已过期':Math.round(age)+' ms 前';node.classList.toggle('is-stale',age===null||age>1200||paused);});},200);
-    try{var initial=await A.api.get('/api/monitor/status');paused=!!initial.released;configure(await A.api.get('/api/config'));setPaused(paused);Object.values(initial.arms||{}).forEach(applyArm);
+    setInterval(function(){['left','right'].forEach(function(side){var arm=latest[side],node=A.el('modelState'+side),age=arm?Math.max(0,Date.now()+serverOffset-arm.timestamp*1000):null;node.textContent=paused?'已断开':age===null?'等待实测反馈':age>1200?'反馈已过期':Math.round(age)+' ms 前';node.classList.toggle('is-stale',age===null||age>1200||paused);if(world&&world.markStale)world.markStale(side,age===null||age>1200||paused);});},200);
+    try{var initial=await A.api.get('/api/monitor/status');paused=!!initial.released;configure(await A.api.get('/api/config'));setPaused(paused);acceptBindings(initial);Object.values(initial.arms||{}).forEach(applyArm);
       geometryBinding=A.autosave.bind({id:'monitor-layout',section:'monitor_layout',root:'#monitorGeometryForm',read:readGeometry,apply:applyGeometry,
         validate:function(){if(!A.el('monitorGeometryForm').checkValidity())throw new Error('请填写有效坐标或正数间距');},
         write:async function(delta){await A.saveConfig(delta);A.el('monitorGeometryState').textContent='位置设置已自动保存。';}});

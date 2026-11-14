@@ -1,0 +1,326 @@
+--- a/lerobot_robot_seeed_b601/seeed_b601_follower.py
++++ b/lerobot_robot_seeed_b601/seeed_b601_follower.py
+@@ -466,226 +466,76 @@
+         return {name: float(tau[qi]) for name, qi in pairing.items()}
+ 
+     def safe_zero(self, step_interval_s: float = 0.02, exit_on_complete: bool = True) -> None:
+-        """Move arm joints back to zero in a safer two-stage interpolation.
+-
+-        Stage 1: CAN ID 1/4/5/6 -> 0
+-        Stage 2: CAN ID 2/3 -> 0
+-        """
+-        if not self.is_connected:
+-            raise DeviceNotConnectedError(f"{self} is not connected.")
+-
+-        if self._in_safe_zero:
+-            logger.warning("safe_zero skipped: already running.")
+-            return
+-
+-        if step_interval_s < 0.0:
+-            raise ValueError("step_interval_s must be >= 0")
+-
+-        self._in_safe_zero = True
+-        # 归零未到位时置位：disconnect() 会跳过失能，避免半路卸力掉臂
+-        self._safe_zero_incomplete = False
++        """Slow measured-pose return; never use send_action's runtime speed."""
++        from .homing_profile import trajectory, HOME_SPEED_RAD_S
++        publisher=None
+         try:
+-            id_to_joint: dict[int, str] = {
+-                send_id: motor_name
+-                for motor_name, (send_id, _) in self.config.motor_can_ids.items()
+-                if motor_name != FOLLOWER_GRIPPER_MOTOR
+-            }
+-
+-            stage_1 = [id_to_joint[i] for i in (1, 4, 5, 6) if i in id_to_joint]
+-            stage_2 = [id_to_joint[i] for i in (2, 3) if i in id_to_joint]
+-            controlled_joints = stage_1 + [name for name in stage_2 if name not in stage_1]
+-
+-            if not controlled_joints:
+-                logger.warning("safe_zero skipped: no arm joints mapped to CAN IDs 1-6.")
+-                return
+-
+-            def _read_motor_deg(joint_name: str) -> float:
+-                """Read a joint's current angle in real motor degrees (no direction scaling)."""
+-                motor = self.motors.get(joint_name)
+-                if motor is None:
+-                    raise RuntimeError(f"safe_zero failed: motor '{joint_name}' not found")
+-
+-                max_retry = 10
+-                for attempt in range(1, max_retry + 1):
+-                    try:
+-                        motor.request_feedback()
+-                        # 给回包一点时间再 poll；立即 poll 可能拿到上一帧，
+-                        # 会让"是否到位"的判断一直看到旧角度。
+-                        time.sleep(0.002)
+-                        self.bus.poll_feedback_once()
+-                    except Exception:
+-                        logger.debug(
+-                            "safe_zero feedback poll failed for %s (attempt %d/%d)",
+-                            joint_name,
+-                            attempt,
+-                            max_retry,
+-                        )
+-
+-                    state = motor.get_state()
+-                    if state is not None:
+-                        return math.degrees(state.pos)
+-
+-                    if attempt < max_retry:
+-                        time.sleep(MEDIUM_TIMEOUT_SEC)
+-
+-                raise RuntimeError(
+-                    f"safe_zero failed: unable to read state for '{joint_name}' after {max_retry} attempts"
+-                )
+-
+-            def _frame_count(
+-                starts: dict[str, float],
+-                targets: dict[str, float] | None = None,
+-            ) -> int:
+-                targets = targets or {}
+-                max_delta_deg = max(
+-                    (abs(targets.get(j, 0.0) - v) for j, v in starts.items()),
+-                    default=0.0,
+-                )
+-                return max(1, math.ceil(max_delta_deg * 2.0))
+-
+-            def _interp_to_zero(
+-                active_starts: dict[str, float],
+-                hold_joints: dict[str, float],
+-                targets: dict[str, float] | None = None,
+-            ) -> bool:
+-                if not active_starts:
+-                    return False
+-                targets = targets or {}
+-                frames = _frame_count(active_starts, targets)
+-                emergency_disable_threshold_c = self.config.temp_emergency_disable_threshold_c
+-                for frame in range(1, frames + 1):
+-                    temperatures = self._read_motor_temperatures()
+-                    for motor_name, temp_c in temperatures.items():
+-                        if temp_c > emergency_disable_threshold_c:
+-                            logger.error(
+-                                "Auto-disable on overtemperature during safe_zero: %s t_mos=%.2fC > %.2fC.",
+-                                motor_name,
+-                                temp_c,
+-                                emergency_disable_threshold_c,
+-                            )
+-                            self._emergency_disable_requested = True
+-                            self.disable_torque()
+-                            logger.error("safe_zero aborted: emergency overtemperature.")
+-                            return True
+-
+-                    ratio = frame / frames
+-                    action: RobotAction = {}
+-                    # Convert motor degrees to action-space here to cancel
+-                    # send_action's *joint_directions transform.
+-                    for joint, start in hold_joints.items():
+-                        d = self.config.joint_directions.get(joint, 1.0) or 1.0
+-                        action[f"{joint}.pos"] = start / d
+-                    for joint, start in active_starts.items():
+-                        target = targets.get(joint, 0.0)
+-                        d = self.config.joint_directions.get(joint, 1.0) or 1.0
+-                        action[f"{joint}.pos"] = (start + (target - start) * ratio) / d
+-                    self.send_action(action)
+-                    if step_interval_s > 0.0:
+-                        time.sleep(step_interval_s)
+-
+-                return False
+-
+-            stage_1_start = {joint: _read_motor_deg(joint) for joint in stage_1}
+-            stage_2_start = {joint: _read_motor_deg(joint) for joint in stage_2}
+-
+-            logger.info("safe_zero stage1 start: joints=%s", stage_1)
+-            if _interp_to_zero(stage_1_start, stage_2_start):
+-                return
+-
+-            # Stage 2: move CAN ID 2/3 back to zero, and bring the gripper back to
+-            # 170° if it is currently past 180° (avoids leaving it wide open).
+-            stage_2_active = dict(stage_2_start)
+-            stage_2_targets: dict[str, float] = {}
+-            if FOLLOWER_GRIPPER_MOTOR in self.motors:
+-                try:
+-                    gripper_motor_deg = _read_motor_deg(FOLLOWER_GRIPPER_MOTOR)
+-                except RuntimeError as e:
+-                    logger.warning("safe_zero: could not read gripper position: %s", e)
+-                    gripper_motor_deg = None
+-
+-                if gripper_motor_deg is not None and abs(gripper_motor_deg) > 360.0:
+-                    # 只有真正的多圈缠绕才回收；零点=闭合位 0°，回收目标也应是 0°。
+-                    target_motor_deg = 0.0
+-                    stage_2_active[FOLLOWER_GRIPPER_MOTOR] = gripper_motor_deg
+-                    stage_2_targets[FOLLOWER_GRIPPER_MOTOR] = target_motor_deg
+-                    logger.info(
+-                        "safe_zero gripper: %.2f° (motor, abs>360°), returning to %.2f°",
+-                        gripper_motor_deg,
+-                        target_motor_deg,
+-                    )
+-
+-            logger.info("safe_zero stage2 start: joints=%s", stage_2)
+-            if _interp_to_zero(
+-                stage_2_active,
+-                {joint: 0.0 for joint in stage_1},
+-                stage_2_targets,
+-            ):
+-                return
+-
+-            # 结束停放：轻力把夹爪合到闭合位（零点 0°）。
+-            # 张开方向是负角度（约 -220°），所以闭合是往 0° 方向走。
+-            park_cfg = getattr(self.config, "gripper_park_deg", None)
+-            if park_cfg is not None and FOLLOWER_GRIPPER_MOTOR in self.motors:
+-                target = float(park_cfg)
+-                try:
+-                    cur_deg = _read_motor_deg(FOLLOWER_GRIPPER_MOTOR)
+-                except RuntimeError as exc:
+-                    logger.warning("safe_zero: gripper read failed: %s", exc)
+-                    cur_deg = None
+-                if cur_deg is not None and abs(target - cur_deg) > 3.0:
+-                    motor = self.motors[FOLLOWER_GRIPPER_MOTOR]
+-                    steps = 25
+-                    for i in range(1, steps + 1):
+-                        deg = cur_deg + (target - cur_deg) * i / steps
+-                        motor.send_force_pos(math.radians(deg), math.radians(80.0), 0.04)
+-                        time.sleep(0.02)
+-                    motor.send_force_pos(math.radians(target), math.radians(60.0), 0.05)
+-                    logger.info("safe_zero gripper: closing to %.1f°", target)
+-                elif cur_deg is not None:
+-                    logger.info(
+-                        "safe_zero gripper: already at %.1f° (target %.1f°), skip",
+-                        cur_deg, target)
+-
+-            # 等真正到位：六轴和夹爪都进入 ±2°，最多等 15 秒。
+-            # 原先固定等 3 秒就失能，夹爪 220° 行程根本走不完，会半路掉力。
+-            tolerance = 2.0
+-            deadline = time.time() + 15.0
+-            worst = float("inf")
+-            positions: dict[str, float] = {}
+-            while True:
+-                positions = {}
+-                for name in self.motors:
+-                    try:
+-                        positions[name] = _read_motor_deg(name)
+-                    except RuntimeError:
+-                        pass
+-                if positions:
+-                    worst = max(abs(v) for v in positions.values())
+-                if len(positions) == len(self.motors) and worst <= tolerance:
+-                    logger.info(
+-                        "safe_zero: all joints within %.1f° of zero (worst %.2f°)",
+-                        tolerance, worst)
+-                    break
+-                if time.time() >= deadline:
+-                    detail = ", ".join(f"{n}={v:.1f}°" for n, v in sorted(positions.items()))
+-                    logger.warning(
+-                        "safe_zero: not fully zero after 15s (%s); keep torque, skip disable",
+-                        detail or "no feedback")
+-                    self._safe_zero_incomplete = True
+-                    break
+-                time.sleep(0.2)
+-
+-            logger.info("safe_zero done.")
+-            if not self._safe_zero_incomplete:
+-                # 确认到位后再保持 3 秒，然后由 disconnect() 失能
+-                logger.info("safe_zero: holding zero position for 3s before disable.")
+-                time.sleep(3.0)
+-            if exit_on_complete:
+-                # Raise KeyboardInterrupt so upper-level control loops handle this
+-                # the same way as Ctrl+C.
+-                raise KeyboardInterrupt("safe_zero completed")
+-        finally:
+-            self._in_safe_zero = False
++            from telemetry_client import FeedbackPublisher
++            publisher=FeedbackPublisher()
++        except ImportError:pass
++        if not self.is_connected:raise DeviceNotConnectedError(f"{self} is not connected.")
++        if self._in_safe_zero:return
++        if not math.isfinite(step_interval_s) or step_interval_s<0:raise ValueError('Invalid homing interval')
++        self._in_safe_zero=True;self._safe_zero_incomplete=True
++        ids={send:name for name,(send,_) in self.config.motor_can_ids.items()}
++        try:
++            if set(ids)!=set(range(1,8)):raise RuntimeError('safe_zero requires all 7 motor mappings')
++            def read():
++                for name in ids.values():self.motors[name].request_feedback()
++                time.sleep(.015);self.bus.poll_feedback_once()
++                states={i:self.motors[name].get_state() for i,name in ids.items()}
++                for i,st in states.items():
++                    if st is None or not all(math.isfinite(float(getattr(st,k))) for k in ('pos','vel','torq','t_mos','t_rotor')):
++                        raise RuntimeError(f'safe_zero: motor {i} missing or invalid feedback')
++                    if st.status_code not in (0,1):raise RuntimeError(f'safe_zero: motor {i} fault {st.status_code}')
++                    if max(st.t_mos,st.t_rotor)>80:raise RuntimeError(f'safe_zero: motor {i} over 80C')
++                if publisher:
++                    try:publisher.send(getattr(self.config,'port',''),[states[i].pos for i in range(1,7)],[states[i].torq for i in range(1,7)],gripper=states[7].pos)
++                    except Exception:pass
++                return states
++            def send(q):
++                if self.motor_type=='rs':
++                    action={}
++                    for i,name in ids.items():
++                        direction=self.config.joint_directions.get(name)
++                        if not direction:raise RuntimeError('safe_zero: missing direction for '+name)
++                        action[name+'.pos']=math.degrees(q[i])/direction
++                    self.send_action(action);return
++                for i,name in ids.items():
++                    motor=self.motors[name]
++                    if i==7:motor.send_force_pos(q[i],HOME_SPEED_RAD_S,min(.05,self.config.force_pos_torque_ration))
++                    else:motor.send_pos_vel(q[i],HOME_SPEED_RAD_S)
++            states=read()
++            if any(abs(st.pos)>4*math.pi for st in states.values()):raise RuntimeError('safe_zero: multi-turn offset outside homing range')
++            # Preserve the established CAN-ID stage order and park target.
++            goal={i:0. for i in ids};goal[7]=math.radians(float(getattr(self.config,'gripper_park_deg',0.) or 0.))
++            for stage,active in enumerate(((1,4,5,6),(2,3),(7,)),1):
++                states=read();target={i:st.pos for i,st in states.items()};previous=dict(target)
++                logger.info('safe_zero stage%s: measured pose, max %.1f deg/s, smooth acceleration',stage,math.degrees(HOME_SPEED_RAD_S))
++                for interval,point in trajectory([target[i] for i in active],[goal[i] for i in active],hz=1/max(.02,min(.1,step_interval_s or .02))):
++                    states=read()
++                    if any(abs(states[i].pos-previous[i])>.10 for i in active):
++                        send({i:st.pos for i,st in states.items()});raise RuntimeError('safe_zero following error; holding measured pose')
++                    for i,v in zip(active,point):target[i]=v
++                    send(target);previous=dict(target);time.sleep(interval)
++                deadline=time.monotonic()+8;settled=0
++                while time.monotonic()<deadline:
++                    states=read();send(target)
++                    settled=settled+1 if all(abs(states[i].pos-goal[i])<.035 and abs(states[i].vel)<.05 for i in active) else 0
++                    if settled>=8:break
++                    time.sleep(.02)
++                else:raise RuntimeError('safe_zero not settled; keep torque and do not disable')
++            states=read()
++            if any(abs(st.pos-goal[i])>=.035 or abs(st.vel)>=.05 for i,st in states.items()):raise RuntimeError('safe_zero final feedback not settled')
++            self._safe_zero_incomplete=False
++            logger.info('safe_zero: measured zero settled; holding 3 seconds before disconnect')
++            time.sleep(3.)
++            if exit_on_complete:raise KeyboardInterrupt('safe_zero completed')
++        except Exception:
++            # Never drop an arm mid-return after missing feedback/obstruction.
++            self._safe_zero_incomplete=True
++            raise
++        finally:self._in_safe_zero=False
+ 
+     def get_observation(self) -> RobotObservation:
+         """Get current observation from robot."""
+--- a/lerobot_robot_seeed_b601/homing_profile.py
++++ b/lerobot_robot_seeed_b601/homing_profile.py
+@@ -0,0 +1,25 @@
++"""Hardware-free, velocity/acceleration bounded minimum-jerk homing samples.
++
++This file is mirrored into the standalone vendor drivers for their CLI entrypoints.
++A scheduler delay never skips samples or jumps to the final target.
++"""
++import math
++
++HOME_SPEED_RAD_S=.15
++HOME_ACCEL_RAD_S2=.20
++HOME_HZ=50.
++
++
++def trajectory(start,target,*,speed=HOME_SPEED_RAD_S,acceleration=HOME_ACCEL_RAD_S2,hz=HOME_HZ,min_duration=2.):
++    start=tuple(float(v) for v in start);target=tuple(float(v) for v in target)
++    if len(start)!=len(target) or not start or not all(math.isfinite(v) for v in start+target):
++        raise ValueError('归零需要完整的有限实测角度')
++    if not all(math.isfinite(v) for v in (speed,acceleration,hz,min_duration)) or not 0<speed<=.3 or not 0<acceleration<=.4 or not 10<=hz<=100 or min_duration<0:
++        raise ValueError('归零速度、加速度或采样频率无效')
++    delta=max(abs(b-a) for a,b in zip(start,target))
++    # Peak first derivative=1.875, peak second derivative=10/sqrt(3).
++    duration=max(min_duration,1.875*delta/speed,math.sqrt((10/math.sqrt(3))*delta/acceleration))
++    steps=max(1,math.ceil(duration*hz));interval=duration/steps
++    for step in range(steps+1):
++        s=step/steps;blend=s*s*s*(10+s*(-15+6*s))
++        yield interval,tuple(a+(b-a)*blend for a,b in zip(start,target))

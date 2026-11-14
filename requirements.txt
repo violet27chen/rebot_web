@@ -1,4 +1,4 @@
-# 机械臂一键操控与训练平台 · Python 依赖（Ubuntu 22.04 / Windows 10+ 均可）
+# 机械臂一键操控与训练平台 · Python 依赖（Ubuntu 控制主机 / Windows 远程终端）
 # 建议在所选 conda 虚拟环境中安装：
 #   pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 # Windows 双击 start_windows.bat 或运行 python start.py（缺依赖会自动补齐）。
@@ -7,7 +7,7 @@
 #   Windows CMD  : set HTTPS_PROXY=  && set HTTP_PROXY=
 # 清华 simple 索引偶发返回空版本列表时改用官方源：-i https://pypi.org/simple
 #
-# Windows 与 Ubuntu 均支持本机 Web 服务和硬件控制；Windows 使用设备驱动提供的 COM 端口。
+# 真机 CAN / 相机 / 自主操作只在 Ubuntu 运行；Windows 可运行远程桌面客户端。
 
 # Web 服务与串口（必需）
 fastapi>=0.110

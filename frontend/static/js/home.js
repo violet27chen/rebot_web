@@ -104,7 +104,7 @@
   A.click("btnStop", function () {
     A.action(async function () {
       await A.stop();
-      A.ok("急停已下发，正在终止当前任务", "#homeAlert");
+      A.ok("已请求停止，正在结束动作与慢速收工", "#homeAlert");
       A.refreshStatus();
     }, "#homeAlert");
   });

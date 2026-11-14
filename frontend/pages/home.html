@@ -4,20 +4,21 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>总览 · 机械臂控制台</title>
   <link rel="icon" type="image/svg+xml" href="/static/img/logo.svg">
-  <link rel="stylesheet" href="/static/css/style.css?v=3.4.1-20261114-2">
+  <link rel="stylesheet" href="/static/css/style.css?v=3.5.4-20261114-20-r2">
 </head>
 <body>
   <div id="shell"></div>
   <div id="page" class="page">
     <div id="homeAlert" class="alert"></div>
 
-    <div class="section-toolbar"><div><h2>开始工作</h2><p>从设备连接，到技能采集与训练</p></div></div>
+    <div class="section-toolbar"><div><h2>开始工作</h2><p>快递分拣：定位 → 检查 / 翻面 → 面单朝上与有效单号确认 → 分类出料</p></div></div>
     <div class="workflow-links">
       <a class="workflow-link" href="/p/connect" id="homeConnectLink" aria-disabled="true" tabindex="-1"><small>01 · 设备</small><strong>连接机械臂</strong><span>选择串口与完成校准 →</span></a>
       <a class="workflow-link" href="/p/camera"><small>02 · 视觉</small><strong>检查相机画面</strong><span>配置与预览多路设备 →</span></a>
       <a class="workflow-link" href="/p/dataset"><small>03 · 示教</small><strong>采集技能数据</strong><span>管理独立技能的数据集 →</span></a>
       <a class="workflow-link" href="/p/train"><small>04 · 策略</small><strong>训练模型</strong><span>设置训练任务与查看进度 →</span></a>
     </div>
+    <div class="card"><div class="card-h"><h2>快递分拣任务</h2><a class="btn primary" href="/p/eval">进入快递分拣</a></div><p>最终出料必须同时确认：面单朝上、唯一有效单号、包裹进入实测出料区。未读到单号不代表面单朝下；超出重试上限的包裹保留并报告原因。</p><p class="hint">默认业务方向：盒子向右、袋子向前。设备连接、相机标定、独立技能采集和训练均为该流程提供支持。</p></div>
     <div class="grid3">
       <div class="card">
         <div class="card-h"><h2>运行环境（服务端真机）</h2></div>
@@ -60,8 +61,8 @@
       <div class="log" id="logPanel"></div>
     </div>
   </div>
-  <script src="/static/js/common.js?v=3.4.1-20261114-2"></script>
-  <script src="/static/js/autosave.js?v=3.4.1-20261114-2"></script>
-  <script src="/static/js/home.js?v=3.4.1-20261114-2"></script>
+  <script src="/static/js/common.js?v=3.5.4-20261114-20-r2"></script>
+  <script src="/static/js/autosave.js?v=3.5.4-20261114-20-r2"></script>
+  <script src="/static/js/home.js?v=3.5.4-20261114-20-r2"></script>
 </body>
 </html>

@@ -960,15 +960,6 @@
 
   A.click("btnReloadModels", function () { loadModels(); });
 
-  A.click("btnApplySortingModel", function () {
-    A.action(async function () {
-      var model = A.el("valModel").value;
-      if (!model) throw new Error("请先在下拉框选择一个训练好的 .pt 模型");
-      await A.saveConfig({ sorting: { yolo_model: model } });
-      A.ok("已将包裹分拣 YOLO 检测模型设为：" + model, "#yoloAlert");
-    }, "#yoloAlert");
-  });
-
   A.click("btnValidate", function () {
     A.action(async function () {
       var model = A.el("valModel").value;

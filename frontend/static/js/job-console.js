@@ -3,6 +3,33 @@
   'use strict';
   var A=window.APP, current=null, dialog, button, homeButton, openedKey='', dismissedKey='', sending=false;
   var mounted=false, boot=Date.now()/1000, lastEvent=0, openedAwaiting=false, homingRequest=false;
+  async function finishEvaluation(){
+    if(homingRequest)throw new Error('收工请求正在处理中，请等待进度完成');
+    homingRequest=true;update(current);
+    try{
+      if(window.WORKSPACE)await window.WORKSPACE.flush();
+      var cfg=await A.api.get('/api/config'),dual=!!(cfg.dual_arm||{}).enabled;
+      var ports=dual?['left','right'].map(function(side){return (cfg.dual_arm[side]||{}).follower_port||'';}):[(cfg.follower||{}).port||''];
+      if(!ports.every(Boolean))throw new Error('请先配置从臂串口');
+      var status=await A.api.get('/api/status'),job=status.running?status.job:null;
+      if(job&&job.kind!=='eval')throw new Error('当前运行的是其他任务，未停止任务或发送归零指令');
+      if(!await A.confirm('目标：'+ports.join('、')+'\n'+(job?'先结束当前策略评估并等待串口释放，再':'即将')+'从实测当前位置慢速归零，到位后失能并释放串口。\n请确认回零路径无障碍、机械臂有支撑、夹爪内没有包裹。',{title:'确认一键收工归零并失能'}))return false;
+      var fresh=await A.api.get('/api/status');
+      if(fresh.running&&(!job||fresh.job.job_id!==job.job_id||fresh.job.kind!=='eval'))throw new Error('当前任务已变化，请重新确认收工');
+      if(fresh.running){
+        await A.api.post('/api/stop',{});A.toast('正在结束策略评估；等待当前任务完成慢速清理并释放串口后继续收工','info');
+        var deadline=Date.now()+30*60*1000;
+        while(fresh.running){
+          if(Date.now()>deadline)throw new Error('等待策略评估结束超时；未开始新的归零任务，请查看任务日志');
+          await new Promise(function(resolve){setTimeout(resolve,500);});fresh=await A.api.get('/api/status');
+          if(fresh.running&&(!fresh.job||fresh.job.job_id!==job.job_id||fresh.job.kind!=='eval'))throw new Error('任务已变化，已取消后续归零');
+        }
+      }
+      if(window.WORKSPACE)await window.WORKSPACE.flush();
+      var result=await A.api.post('/api/devices/home-and-disable',{confirm:true,expected_ports:ports},15000);
+      await A.refreshStatus();A.toast('已启动慢速收工归零，到位后失能；进度见全局任务日志','ok');return result;
+    }finally{homingRequest=false;update(current);}
+  }
   function key(job){return job ? String(job.job_id||job.name||job.job)+'/'+String(job.prompt_id||0) : '';}
   function close(){if(dialog&&dialog.open)dialog.close();openedKey='';}
   function update(job){
@@ -46,16 +73,6 @@
       // A second prompt may arrive before the first POST completes.
       if(current&&current.awaiting_input&&key(current)!==dismissedKey&&!dialog.open)open();}
   }
-  // Only the persistent browser shell grants movement heartbeat. The runner
-  // cannot renew its own permission after the browser/network disconnects.
-  var heartbeatPending=false;
-  setInterval(async function(){
-    if(heartbeatPending||!current||current.kind!=='sorting-run'||!current.job_id)return;
-    heartbeatPending=true;
-    try{await A.api.post('/api/sorting/heartbeat',{job_id:current.job_id},1200);}
-    catch(e){/* CAN watchdog freezes targets when this heartbeat expires. */}
-    finally{heartbeatPending=false;}
-  },350);
   function mount(){
     if(mounted)return;mounted=true;
     dialog=document.createElement('dialog');dialog.id='jobInputDialog';dialog.className='job-input-dialog';
@@ -99,5 +116,5 @@
     A.onStatus(function(status){if(status&&status.status_ts&&status.status_ts<lastEvent)return;update(status&&status.running?status.job:null);});
     var status=A.status();update(status&&status.running?status.job:null);
   }
-  window.JOB_CONSOLE={mount:mount,open:open};
+  window.JOB_CONSOLE={mount:mount,open:open,finishEvaluation:finishEvaluation};
 })();

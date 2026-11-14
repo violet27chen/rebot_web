@@ -227,17 +227,11 @@ def main() -> None:
                 return {"ok": True, **snapshot()}
 
             if action == "quit":
-                # 收工：先安全回零，再卸力，然后让守护进程退出（释放串口）
-                try:
-                    ensure_ctl()
-                    ctl.safe_home()
-                    time.sleep(0.5)
-                except Exception:
-                    pass
-                try:
-                    arm.disable_all()
-                except Exception:
-                    pass
+                # Failed slow return keeps this owner alive for recovery.
+                ensure_ctl()
+                ctl.safe_home(max_vel=.15)
+                time.sleep(.5)
+                arm.disable_all()
                 return {"ok": True, "closed": True, "bye": True}
 
             return {"ok": False, "error": f"未知指令：{action}"}

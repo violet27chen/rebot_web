@@ -109,10 +109,24 @@
     // Both URDFs use the same rigid rotation: z-up to y-up, +X forward to -Z.
     leftRoot.rotation.y=rightRoot.rotation.y=Math.PI/2;
     var robots={},angles={},dual=false,distance=null,onLoaded,onError,loaded=false,demonstrationDistance=0,basePositions=null;
+    leftRoot.name='left_follower_root';rightRoot.name='right_follower_root';
+    var bound={},measured={},stale={left:true,right:true},labels={};
+    ['left','right'].forEach(function(side){var n=document.createElement('div');n.className='monitor-model-binding is-stale';n.dataset.side=side;n.hidden=true;labels[side]=n;});
+    function bind(side,value){if(side!=='left'&&side!=='right')return;bound[side]=Object.assign({},value);var label=labels[side];label.textContent=(value.label||(side==='left'?'左从臂':'右从臂'))+' · '+(value.canonical_port||value.port||'未配置');label.title=(value.port||'未配置')+(value.canonical_port&&value.port!==value.canonical_port?' → '+value.canonical_port:'');label.dataset.port=value.canonical_port||value.port||'';if(robots[side])robots[side].userData.port=label.dataset.port;}
+    function clear(side){if(side!=='left'&&side!=='right')return;setJoint(side,[0,0,0,0,0,0]);measured[side]=false;stale[side]=true;}
+    function labelPositions(){
+      if(!loaded)return;var parent=canvas.parentElement;if(!parent)return;
+      var rect=canvas.getBoundingClientRect(),host=parent.getBoundingClientRect();group.updateMatrixWorld(true);camera.updateMatrixWorld(true);
+      ['left','right'].forEach(function(side){var n=labels[side],root=side==='left'?leftRoot:rightRoot;if(n.parentElement!==parent)parent.appendChild(n);n.hidden=side==='right'&&!dual;if(n.hidden)return;
+        var point=root.localToWorld(new THREE.Vector3(0,.025,0)).project(camera);n.hidden=point.z<-1||point.z>1;if(n.hidden)return;
+        n.style.left=(rect.left-host.left+Math.max(8,Math.min(rect.width-8,(point.x+1)*rect.width/2)))+'px';n.style.top=(rect.top-host.top+Math.max(8,Math.min(rect.height-25,(1-point.y)*rect.height/2)))+'px';n.classList.toggle('is-stale',stale[side]||!measured[side]);
+      });
+    }
+
     var lineGeometry=new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(),new THREE.Vector3()]);
     var baseline=new THREE.Line(lineGeometry,new THREE.LineBasicMaterial({color:0x3478df}));scene.add(baseline);
     function view(){camera.position.setFromSpherical(spherical).add(target);camera.lookAt(target);}
-    function setJoint(side,q){angles[side]=q&&q.slice();var robot=robots[side];if(!robot||!q)return;
+    function setJoint(side,q){if(side!=='left'&&side!=='right')return;angles[side]=q&&q.slice();measured[side]=!!q;stale[side]=!q;var robot=robots[side];if(!robot||!q)return;
       for(var i=0;i<6;i++){var joint=robot.joints['joint'+(i+1)];if(joint&&q[i]!==undefined)joint.setJointValue(SIGN['joint'+(i+1)]*q[i]);}}
     function fit(){if(!loaded)return;group.updateMatrixWorld(true);var box=new THREE.Box3().setFromObject(leftRoot),size=new THREE.Vector3();if(dual)box.union(new THREE.Box3().setFromObject(rightRoot));box.getSize(size);box.getCenter(target);
       var horizontal=size.x/Math.max(camera.aspect,.25),dimension=Math.max(size.y,horizontal,size.z*.7,.25);
@@ -133,10 +147,12 @@
     var manager=new THREE.LoadingManager(),template,resourceError=null;
     manager.onLoad=function(){if(!template||loaded||resourceError)return;
       robots.left=template;robots.right=template.clone(true);
+      for(var id in robots.left.joints){if(robots.left.joints[id]===robots.right.joints[id]){resourceError='左右官方模型关节实例未隔离';if(onError)onError(resourceError);return;}}
+      ['left','right'].forEach(function(side){robots[side].name=side+'_follower_model';robots[side].userData.side=side;if(bound[side])bind(side,bound[side]);});
       robots.left.rotation.x=robots.right.rotation.x=-Math.PI/2;leftRoot.add(robots.left);rightRoot.add(robots.right);
       // This layout-only spacing is NEVER saved or presented as a real baseline.
       var bounds=new THREE.Box3().setFromObject(leftRoot),size=new THREE.Vector3();bounds.getSize(size);demonstrationDistance=Math.max(size.x,size.z)*1.35;
-      loaded=true;position();Object.keys(angles).forEach(function(side){setJoint(side,angles[side]);});if(onLoaded)onLoaded();
+      loaded=true;position();Object.keys(angles).forEach(function(side){var known=measured[side],wasStale=stale[side];setJoint(side,angles[side]);measured[side]=known;stale[side]=wasStale;});if(onLoaded)onLoaded();
     };
     manager.onError=function(url){resourceError='官方模型资源未加载：'+url;if(onError)onError(resourceError);};
     var loader=new URDFLoader(manager);loader.packages={'':'/static/arm_urdf/'};
@@ -155,8 +171,8 @@
     canvas.addEventListener('pointerup',end);canvas.addEventListener('pointercancel',end);
     canvas.addEventListener('wheel',function(e){e.preventDefault();spherical.radius=Math.max(.3,Math.min(12,spherical.radius*(1+e.deltaY*.001)));view();},{passive:false});
     canvas.addEventListener('contextmenu',function(e){e.preventDefault();});
-    function animate(){requestAnimationFrame(animate);renderer.render(scene,camera);}animate();
-    return {set:setJoint,resize:resize,fit:fit,layout:function(settings){var change=dual!==!!settings.dual||distance!==settings.distance_mm||JSON.stringify(basePositions)!==JSON.stringify(settings.base_positions_mm||null);dual=!!settings.dual;distance=settings.distance_mm;basePositions=settings.base_positions_mm||null;if(change)position();},
+    function animate(){requestAnimationFrame(animate);labelPositions();renderer.render(scene,camera);}animate();
+    return {bind:bind,clear:clear,markStale:function(side,value){stale[side]=!!value;},getState:function(side){var r=robots[side];return {side:side,port:(bound[side]||{}).canonical_port||(bound[side]||{}).port||'',measured:!!measured[side],modelId:r?r.uuid:null,joints:r?[1,2,3,4,5,6].map(function(i){return r.joints['joint'+i].jointValue[0];}):null};},set:setJoint,resize:resize,fit:fit,layout:function(settings){var change=dual!==!!settings.dual||distance!==settings.distance_mm||JSON.stringify(basePositions)!==JSON.stringify(settings.base_positions_mm||null);dual=!!settings.dual;distance=settings.distance_mm;basePositions=settings.base_positions_mm||null;if(change)position();},
       onLoad:function(cb){onLoaded=cb;if(loaded)cb();},onError:function(cb){onError=cb;}};
   }
 

@@ -5,10 +5,12 @@
   await A.init({ active: "logs", title: "日志与命令", subtitle: "真实终端输出与训练指标" });
   A.attachLogPanel(A.el("logPanel"));
 
-  var losses = [];
+  var series=A.lossSeries(600);
 
   function draw() {
-    A.chart(A.el("lossChart"), losses);
+    var losses=series.points(),axes=A.lossAxes(series.unit());
+    A.chart(A.el("lossChart"), losses,axes);
+    A.el('lossAxes').textContent='X：'+axes.xLabel+' · Y：'+axes.yLabel+' · 显示最近 600 个训练位置';
     A.el("lossCount").textContent = losses.length + " 个点";
   }
 
@@ -46,21 +48,17 @@
   A.onStatus(renderStatus);   // 状态轮询成功时自动覆盖加载/失败状态框
   A.onTheme(function () { draw(); });
   A.onLog(function (ev) {
-    if (ev.type === "loss" && typeof ev.value === "number") {
-      losses.push(ev.value);
-      if (losses.length > 600) losses.shift();
-      draw();
-    }
+    if(series.add(ev))draw();
   });
   A.logs().forEach(function (ev) {
-    if (ev.type === "loss" && typeof ev.value === "number") losses.push(ev.value);
+    series.add(ev);
   });
   draw();
 
   A.click("btnStop", function () {
     A.action(async function () {
       await A.stop();
-      A.ok("急停已下发", "#logsAlert");
+      A.ok("已请求停止；归零任务会从当前位置慢速收工", "#logsAlert");
       A.refreshStatus();
     }, "#logsAlert");
   });

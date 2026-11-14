@@ -978,6 +978,17 @@ button, .btn { border-radius: 8px; min-height: 38px; }
 .card-h > .sub, #cmdPreview, #dsDirInfo, #datasetFeatures, .robot-context > [data-context-detail] { min-width:0;max-width:100%;overflow-wrap:anywhere; }
 .chart-wrap { min-width:0;max-width:100%; }
 .chart-wrap canvas { max-width:100%; }
+#ckptTable { table-layout:fixed; }
+#ckptTable td, #ckptTable th { overflow-wrap:anywhere; }
+#ckptTable td:last-child, #ckptTable th:last-child { width:100px; }
+#ckptTable td .btn { margin:3px 0;max-width:100%; }
+.model-eval-dialog { border:1px solid var(--border);border-radius:14px;padding:0;background:var(--surface);color:var(--text);width:min(680px,calc(100vw - 28px));max-height:90vh;overflow:auto; }
+.model-eval-dialog::backdrop { background:rgba(12,20,35,.45); }
+.model-eval-dialog .notify-modal { width:100%;max-width:none;box-shadow:none; }
+.model-eval-dialog .notify-head { display:flex;justify-content:space-between;align-items:center; }
+.model-eval-dialog .field { margin-bottom:12px; }
+#modelEvalCard { overflow-wrap:anywhere; }
+#modelEvalCard .kv dt, #modelEvalCard .kv dd { min-width:0;white-space:normal;overflow-wrap:anywhere; }
 
 /* Persistent workspace: navigation never remounts the device monitors. */
 .workspace-console .app.console-layout { grid-template-columns:216px minmax(0,1fr) 380px; }
@@ -1154,3 +1165,11 @@ button, .btn { border-radius: 8px; min-height: 38px; }
 .sorting-panel .note{white-space:pre-line}.sorting-panel pre,.rgbd-panel pre{white-space:pre-wrap;overflow-wrap:anywhere}
 #rgbdCalibrationId,#sortingCalibId{overflow-wrap:anywhere}
 @media(max-width:760px){.rgbd-views,.rgbd-fit-grid,.rgbd-steps{grid-template-columns:1fr}.rgbd-panel .row,.sorting-panel .row{flex-wrap:wrap}}
+
+/* Source badges follow each actual model base, including rotated/modal views. */
+.monitor-model-binding{position:absolute;z-index:3;pointer-events:none;transform:translate(-50%,-100%);max-width:46%;padding:3px 6px;border:1px solid #3478df;background:var(--surface,#fff);color:var(--text,#152238);border-radius:5px;box-shadow:0 1px 4px #0002;font-size:10px;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.monitor-model-binding[data-side="right"]{border-color:#cf7626}
+.monitor-model-binding.is-stale{opacity:.6;border-style:dashed}
+.monitor-model-binding[hidden]{display:none}
+.monitor-preview-view .monitor-model-binding{font-size:13px;padding:5px 9px}
+@media(max-width:900px){.monitor-model-binding{font-size:8px;padding:1px 3px}}

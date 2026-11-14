@@ -17,7 +17,7 @@
     { id: "viewer",  label: "数据查看",   href: "/p/viewer",  ico: "play" },
     { id: "yolo",    label: "视觉数据",   href: "/p/yolo",    ico: "grid" },
     { id: "train",   label: "模型训练",   href: "/p/train",   ico: "cpu" },
-    { id: "eval",    label: "策略评估",   href: "/p/eval",    ico: "chart" },
+    { id: "eval",    label: "快递分拣",   href: "/p/eval",    ico: "chart" },
     { id: "setup",   label: "环境安装",   href: "/p/setup",   ico: "package" },
     { id: "logs",    label: "日志与命令", href: "/p/logs",    ico: "terminal" }
   ];
@@ -624,7 +624,7 @@
     e.preventDefault();
     action(async function () {
       await API.post("/api/stop", {});
-      ok("急停已下发，正在终止子进程");
+      ok("已请求停止，正在结束动作与慢速收工");
     });
   });
 
@@ -1736,8 +1736,33 @@
   }
 
   /* ---------------- Loss 折线图 ---------------- */
-  function chart(canvas, data) {
+  function lossSeries(limit) {
+    var points=[],run=null,retired=new Set(),lastStep=-1,lastTs=0,unit='step';
+    function begin(id){
+      if(!id||id===run||retired.has(id))return false;
+      if(run)retired.add(run);if(retired.size>20)retired.delete(retired.values().next().value);
+      run=id;points=[];lastStep=-1;lastTs=0;unit='step';return true;
+    }
+    return {begin:begin,clear:function(){points=[];},points:function(){return points.slice();},unit:function(){return unit;},
+      add:function(ev){
+        if(ev.type!=='loss'||typeof ev.value!=='number'||!Number.isFinite(ev.value)||ev.kind&&!ev.kind.startsWith('train'))return false;
+        if(ev.job_id&&retired.has(ev.job_id))return false;
+        var step=Number(ev.step),nextUnit=ev.step_unit||'step';
+        if(ev.step===null||ev.step===undefined||!Number.isFinite(step)||step<0)return false;
+        if(ev.job_id)begin(ev.job_id);
+        if(step<lastStep||ev.ts&&ev.ts<lastTs)return false;
+        if(points.length&&nextUnit!==unit)return false;
+        var last=points[points.length-1];
+        if(last&&last.step===step){if(last.value===ev.value)return false;last.value=ev.value;}
+        else points.push({step:step,value:ev.value});
+        lastStep=step;lastTs=Number(ev.ts)||lastTs;unit=nextUnit;
+        if(points.length>(limit||600))points.shift();return true;
+      }};
+  }
+  function lossAxes(unit){return {xLabel:unit==='epoch'?'训练轮次（Epoch）':unit==='metric'?'指标序号':'训练步数（Step）',yLabel:'损失值（Loss）'};}
+  function chart(canvas, data, options) {
     if (!canvas) return;
+    options=options||{};var xLabel=options.xLabel||'训练步数（Step）',yLabel=options.yLabel||'损失值（Loss）';
     var dpr = window.devicePixelRatio || 1;
     var w = canvas.clientWidth || 600, h = canvas.clientHeight || 220;
     canvas.width = Math.round(w * dpr);
@@ -1772,13 +1797,18 @@
       }
     });
 
-    var pad = { l: 58, r: 18, t: 14, b: 30 };
+    var pad = { l: 80, r: 24, t: 14, b: 56 };
     var iw = w - pad.l - pad.r, ih = h - pad.t - pad.b;
     ctx.strokeStyle = grid;
     ctx.fillStyle = muted;
     ctx.font = "11px -apple-system, Segoe UI, sans-serif";
     ctx.textAlign = "right";
     ctx.textBaseline = "middle";
+    function axes(){
+      ctx.save();ctx.fillStyle=text;ctx.font='12px -apple-system, Segoe UI, sans-serif';ctx.textAlign='center';ctx.textBaseline='middle';
+      ctx.fillText(xLabel,pad.l+iw/2,h-12);ctx.translate(14,pad.t+ih/2);ctx.rotate(-Math.PI/2);ctx.fillText(yLabel,0,0);ctx.restore();
+      canvas.setAttribute('role','img');canvas.setAttribute('aria-label','X 轴：'+xLabel+'；Y 轴：'+yLabel+(pts.length?'；范围 '+pts[0].x+' 至 '+pts[pts.length-1].x:'；等待指标'));
+    }
 
     if (!pts.length) {
       ctx.clearRect(0, 0, w, h);
@@ -1790,6 +1820,7 @@
       ctx.fillStyle = muted;
       ctx.textAlign = "center";
       ctx.fillText("等待训练指标（loss）…", w / 2, h / 2);
+      axes();
       return;
     }
 
@@ -1823,7 +1854,7 @@
       ctx.fillText(fmt(yv), pad.l - 8, yy);
     }
     // X 轴刻度：直接取真实数据点的 step，避免四舍五入出现重复标签
-    var ticks = Math.min(5, Math.max(1, pts.length - 1));
+    var ticks = Math.min(w<400?2:5, Math.max(1, pts.length - 1));
     var seen = {};
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
@@ -1874,6 +1905,7 @@
     ctx.fillStyle = line;
     ctx.textAlign = lx > w - 90 ? "right" : "left";
     ctx.fillText(fmt(last.y), lx + (lx > w - 90 ? -8 : 8), ly - 10);
+    axes();
   }
 
   /* ---------------- 运行位置：服务端真机 vs 当前访问设备 ----------------
@@ -2279,7 +2311,18 @@
 
   if(window.parent!==window){
     document.addEventListener('click',function(event){var a=event.target.closest&&event.target.closest('a[href]');if(!a||a.target==='_blank'||event.ctrlKey||event.metaKey)return;var url=new URL(a.href,location.origin);if(url.origin===location.origin&&(url.pathname.startsWith('/p/')||url.pathname==='/')){event.preventDefault();parent.postMessage({type:'rebot:navigate',path:url.pathname+url.search+url.hash},location.origin);}});
-    window.addEventListener('load',function(){new ResizeObserver(function(){parent.postMessage({type:'rebot:layout',height:document.documentElement.scrollHeight},location.origin);}).observe(document.body);});
+    window.addEventListener('load',function(){
+      // documentElement.scrollHeight is at least the iframe viewport height;
+      // measuring it makes a previously tall page impossible to shrink.
+      var last=0,scheduled=false;
+      function report(){scheduled=false;var app=document.querySelector('.app');if(!app)return;
+        var height=Math.ceil(app.getBoundingClientRect().height);
+        if(height!==last){last=height;parent.postMessage({type:'rebot:layout',height:height,path:location.pathname+location.search},location.origin);}
+      }
+      function schedule(){if(!scheduled){scheduled=true;requestAnimationFrame(report);}}
+      var observer=new ResizeObserver(schedule);observer.observe(document.querySelector('.app')||document.body);
+      window.addEventListener('resize',schedule);schedule();
+    });
   }
   window.APP = {
     commandPreview: commandPreview, init: init, api: API, esc: esc, el: el, q: q, qa: qa, icon: icon,
@@ -2300,7 +2343,7 @@
     mountEnvLocation: mountEnvLocation,
     mountLerobotCard: mountLerobotCard,
     envLocation: function () { return envLocCtl; },
-    chart: chart, setTheme: setTheme, themePref: themePref,
+    chart: chart, lossSeries: lossSeries, lossAxes: lossAxes, setTheme: setTheme, themePref: themePref,
     modalHost: modalHost,
     clientPrefs: clientPrefs, setClientPrefs: setClientPrefs,
     runtime: function () { return runtimeInfo; },

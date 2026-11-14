@@ -31,7 +31,7 @@
  }
  function selected(){return A.qa('#zeroJoints input:checked').map(function(n){return Number(n.value);});}
  function paint(result){
-  A.el('zeroReadings').innerHTML=(result.joints||[]).map(function(j){return '<tr><td>'+j.id+'</td><td>'+Number(j.degrees).toFixed(2)+'°</td><td>'+(j.disabled?'已失能':'已使能')+'</td></tr>';}).join('');
+  A.el('zeroReadings').innerHTML=(result.joints||[]).map(function(j){return '<tr><td>'+j.id+'</td><td>'+Number(j.degrees).toFixed(2)+'°</td><td>'+(j.status_code!==undefined&&![0,1].includes(j.status_code)?'故障码 '+j.status_code:j.disabled?'已失能':'已使能')+'</td></tr>';}).join('');
   A.el('zeroState').textContent=(result.side==='right'?'右从臂':'当前 / 左从臂')+' · '+result.port+' · '+new Date(result.timestamp*1000).toLocaleTimeString()+' 实测';
  }
  async function run(action){
@@ -59,8 +59,8 @@
    while(!stopped&&Date.now()<end){
     var progress=await A.api.get('/api/devices/zero/result?job_id='+encodeURIComponent(r.job_id));
     if(progress.finished){
-     if(progress.exit_code!==0||!progress.result)throw new Error(progress.last_line||'操作失败，请查看全局任务日志');
-     paint(progress.result);A.setAlert('#zeroAlert',action==='set-zero'?'所选关节零点已写入、保存并回读确认。重新连接后再启动遥操作。':action==='release'?'已确认全部关节失能，可托住机械臂手动摆位。':'实测角度已更新。','ok');break;
+     if(progress.exit_code!==0||!progress.result){if(progress.result&&progress.result.joints)paint(progress.result);throw new Error((progress.result||{}).error||progress.last_line||'操作失败，请查看全局任务日志');}
+     paint(progress.result);var missing=progress.result.missing_joints||[];A.setAlert('#zeroAlert',action==='set-zero'?'所选关节零点已写入、保存并回读确认。重新连接后再启动遥操作。':action==='release'?'已确认全部关节失能，可托住机械臂手动摆位。':'所选关节实测角度已更新。'+(missing.length?' 未返回的其他关节：'+missing.join('、')+'；写零和释放仍需整臂完整反馈。':''),'ok');break;
     }
     A.el('zeroState').textContent=progress.last_line||'正在等待设备反馈…';
     await new Promise(function(resolve){setTimeout(resolve,400);});

@@ -7,13 +7,12 @@
 
   var backends = [];
   var selected = "lerobot";
-  var losses = [], trainAutosave = null;
+  var series=A.lossSeries(600), trainAutosave = null, checkpoints = [], inspectSerial = 0;
 
   function draw() {
-    // 训练日志的 step 会重复（同一步打多条 loss），直接按 step 画会并点。
-    // 这里横轴用「指标点序号」，保证 20 条 loss 就是 20 个点，曲线完整。
-    var plotted = losses.map(function (p, i) { return { step: i + 1, value: p.value }; });
-    A.chart(A.el("lossChart"), plotted);
+    var losses=series.points(),axes=A.lossAxes(series.unit());
+    A.chart(A.el("lossChart"), losses, axes);
+    A.el('lossAxes').textContent='X：'+axes.xLabel+' · Y：'+axes.yLabel+' · 显示最近 600 个训练位置，同一步更新为最新值';
     var box = A.el("lossCount");
     if (!box) return;
     if (!losses.length) {
@@ -25,7 +24,7 @@
     var min = Math.min.apply(null, vals);
     var avg = vals.reduce(function (a, b) { return a + b; }, 0) / vals.length;
     box.textContent = "最新 " + last.toFixed(4) + " · 最小 " + min.toFixed(4) +
-      " · 平均 " + avg.toFixed(4) + " · " + vals.length + " 点";
+      " · 平均 " + avg.toFixed(4) + " · " + vals.length + " 点 · 最新位置 " + losses[losses.length-1].step;
   }
 
   function num(id, fallback) {
@@ -40,6 +39,7 @@
       return {
         repo_id: str("l_repo_id"), policy_type: str("l_policy_type") || "act",
         dataset_dir: str("l_dataset_dir"), base_model: str("l_base_model"),
+        training_mode: str('l_training_mode'), learning_rate: str('l_policy_type') === 'act' ? num('l_learning_rate', 0) : 0,
         steps: num("l_steps", 300000), batch_size: num("l_batch_size", 0),
         device: str("l_device") || "cuda", output_dir: str("l_output_dir"),
         job_name: str("l_job_name"), wandb: A.el("l_wandb").checked,
@@ -66,6 +66,7 @@
   }
 
   function updateDep() {
+    syncBaseModelRow();
     var b = current(), box = A.el("depBox");
     if (!b) { box.className = "alert"; box.textContent = ""; return; }
     if (b.available) {
@@ -80,7 +81,7 @@
       ? "LeRobot 请到「环境安装」页面安装" : ("安装 " + selected + " 训练依赖（清华源）");
     A.el("btnResume").disabled = (selected !== "lerobot");
     var p = buildParams();
-    var policyArg = p.base_model ? ("--policy.path=" + p.base_model)
+    var policyArg = p.training_mode === 'finetune' ? ("--policy.path=" + (p.base_model || '(请选择已有模型)'))
       : ("--policy.type=" + p.policy_type);
     var dsArg = p.dataset_dir
       ? ("--dataset.root=" + p.dataset_dir + " --dataset.repo_id=" +
@@ -89,7 +90,7 @@
     A.el("cmdPreview").textContent = selected === "lerobot"
       ? ("lerobot-train " + dsArg + " " + policyArg +
          " --steps=" + p.steps + " --job_name=" + (p.job_name || "(启动时自动生成)") +
-         " --output_dir=" + p.output_dir)
+         " --output_dir=" + p.output_dir + (p.learning_rate > 0 && p.policy_type === 'act' ? ' --policy.optimizer_lr=' + p.learning_rate + ' --policy.optimizer_lr_backbone=' + p.learning_rate : ''))
       : (selected === "yolo"
         ? ("python -u backend/trainers/yolo_trainer.py --data " + (p.data_yaml || "(自动生成)") +
            " --epochs " + p.epochs + " --output " + p.output_dir)
@@ -170,7 +171,8 @@
     var box = A.el("hfStatus");
     if (!box) return;
     var mid = (A.el("l_base_model").value || "").trim();
-    if (!mid) { box.textContent = "选择基础模型后显示本地缓存状态"; return; }
+    if (str('l_training_mode') !== 'finetune' || !mid) { box.textContent = "微调时复用已有模型；从头训练无需选择基础模型。"; return; }
+    if (mid.startsWith('/') || mid.startsWith('.') || mid.startsWith('outputs/')) { box.textContent = '本地模型：' + mid + ' · 启动前检查权重与数据集兼容性'; return; }
     box.textContent = "正在检查本地模型…";
     try {
       var r = await A.api.get("/api/model/cache?model_id=" + encodeURIComponent(mid));
@@ -236,6 +238,7 @@
       var d = (r.datasets || []).filter(function (x) { return x.repo_id === repo; })[0];
       if (!d || !d.path) return;
       A.el("l_dataset_dir").value = d.path;
+      invalidateInspection();
       A.el("dsDirInfo").textContent = "当前目录：" + d.path + " · " +
         (d.episodes || 0) + " 集";
       if (save) {
@@ -250,6 +253,7 @@
     var t = c.train || {}, y = c.yolo || {}, o = c.opencv || {};
     await loadRepoIdOptions(t.repo_id);
     A.el("l_policy_type").value = t.policy_type || "act";
+    A.el('l_training_mode').value = t.training_mode || (t.base_model ? 'finetune' : 'scratch');
     syncBaseModelRow();
     A.el("l_base_model").value = t.base_model || "";
     A.el("l_dataset_dir").value = t.dataset_dir || "";
@@ -264,6 +268,7 @@
     }).catch(function () {});
     A.el("l_steps").value = t.steps || 300000;
     A.el("l_batch_size").value = t.batch_size || 0;
+    A.el('l_learning_rate').value = t.learning_rate || 0;
     A.el("l_device").value = t.device || "cuda";
     A.el("l_output_dir").value = t.output_dir || "";
     A.el("l_job_name").value = t.job_name || "";
@@ -308,6 +313,31 @@
     }
   }
 
+  function isPolicyCheckpoint(c){return c.can_finetune !== false && (c.policy_type || /(?:^|\/)pretrained_model\/?$/.test(c.path));}
+  function populateCheckpoints(){
+    var select=A.el('l_checkpoint'),type=str('l_policy_type'),base=str('l_base_model');
+    var choices=checkpoints.filter(function(c){return isPolicyCheckpoint(c)&&(!c.policy_type||c.policy_type===type);});
+    select.innerHTML='<option value="">手动输入模型路径</option>'+choices.map(function(c){return '<option value="'+A.esc(c.path)+'">'+A.esc(c.path)+'</option>';}).join('');
+    select.value=choices.some(function(c){return c.path===base;})?base:'';
+  }
+  function invalidateInspection(){inspectSerial++;A.el('finetuneStatus').textContent='模型或数据集变更后，请重新检查兼容性。';}
+  async function inspectFinetune(){
+    var serial=++inspectSerial,box=A.el('finetuneStatus');box.textContent='正在检查模型权重和数据集特征…';
+    try{
+      var result=await A.api.post('/api/train/finetune/inspect',buildParams('lerobot'));
+      if(serial!==inspectSerial)throw new Error('模型或数据集已变化，请重新检查后启动微调');
+      box.textContent='检查通过：'+result.note;return result;
+    }catch(error){if(serial===inspectSerial)box.textContent='检查未通过：'+error.message;throw error;}
+  }
+  function selectCheckpoint(path){
+    var entry=checkpoints.find(function(c){return c.path===path;});
+    if(entry&&entry.policy_type)A.el('l_policy_type').value=entry.policy_type;
+    A.el('l_training_mode').value='finetune';A.el('l_base_model').value=path;
+    selectEngine('lerobot');populateCheckpoints();invalidateInspection();updateModelCacheStatus();
+    if(trainAutosave)trainAutosave.changed();
+    A.action(inspectFinetune,'#trainAlert');
+  }
+
   async function loadCheckpoints() {
     var body = A.q("#ckptTable tbody");
     A.showLoading(body, {
@@ -315,11 +345,13 @@
     });
     try {
       var r = await A.api.get("/api/checkpoints");
+      checkpoints = r.checkpoints || [];
+      populateCheckpoints();
       if (r.checkpoints.length) {
         body.innerHTML = r.checkpoints.map(function (c) {
           return "<tr><td><code>" + A.esc(c.path) + "</code>" +
             (c.config ? '<br><span class="muted">' + A.esc(c.config) + "</span>" : "") +
-            '</td><td><button type="button" class="btn sm danger" data-app-nofb ' +
+            '</td><td>' + (isPolicyCheckpoint(c) ? '<button type="button" class="btn sm" data-ckpt-finetune="' + A.esc(c.path) + '">用于微调</button> ' + (!c.policy_type || c.policy_type==='act' ? '<button type="button" class="btn sm" data-model-eval="'+A.esc(c.path)+'">离线评估</button> ' : '') : '') + '<button type="button" class="btn sm danger" data-app-nofb ' +
             'data-ckpt-del="' + A.esc(c.path) + '">删除</button></td></tr>';
         }).join("");
       } else {
@@ -335,6 +367,12 @@
   }
 
   document.addEventListener("click", async function (e) {
+    var choose = e.target && e.target.closest ? e.target.closest('[data-ckpt-finetune]') : null;
+    if (choose) {
+      e.preventDefault();selectCheckpoint(choose.getAttribute('data-ckpt-finetune'));
+      A.el('l_training_mode').scrollIntoView({block:'start',behavior:'instant'});
+      return;
+    }
     var b = e.target && e.target.closest ? e.target.closest("[data-ckpt-del]") : null;
     if (!b) return;
     e.preventDefault();
@@ -363,6 +401,7 @@
   async function chooseDatasetDir(path) {
     var r = await A.api.get("/api/dataset/inspect?path=" + encodeURIComponent(path));
     A.el("l_dataset_dir").value = r.path;
+    invalidateInspection();
     A.el("dsDirInfo").textContent = "当前目录：" + r.path + " · " + r.episodes + " 集 · " +
       r.frames + " 帧 · 相机：" + (r.cameras || []).join(", ");
     await A.saveConfig({ train: { dataset_dir: r.path, repo_id: r.name } });
@@ -473,6 +512,7 @@
   A.click("btnClearDs", function () {
     A.action(async function () {
       A.el("l_dataset_dir").value = "";
+      invalidateInspection();
       await A.saveConfig({ train: { dataset_dir: "" } });
       A.ok("已清除目录，将使用上方 repo_id", "#trainAlert");
       updateDep();
@@ -482,37 +522,46 @@
   A.click("btnTrain", function () {
     A.action(async function () {
       A.clearAlert("#trainAlert");
+      if(trainAutosave)await trainAutosave.flush();
       var p = buildParams();
+      if(selected === 'lerobot' && p.training_mode === 'scratch')p.base_model='';
       if (selected === "lerobot" && !p.repo_id) {
         throw new Error("请先选择数据集：还没有可用的已录制数据集，请到「训练数据」页采集");
       }
+      if(selected === 'lerobot' && p.training_mode === 'finetune')await inspectFinetune();
       var r = await A.api.post("/api/train/start", { backend: selected, params: p });
       if (selected === "lerobot" && r.job_name) {
         A.el("l_job_name").value = r.job_name;
-        await A.saveConfig({ train: { job_name: r.job_name } });
+        if(r.output_dir)A.el('l_output_dir').value=r.output_dir;
+        await A.saveConfig({ train: { job_name: r.job_name, output_dir: r.output_dir || p.output_dir } });
       }
-      losses = []; draw();
-      A.ok("训练已启动：" + r.name, "#trainAlert");
+      series.begin(r.job_id);draw();
+      A.ok((p.training_mode === 'finetune' ? '微调' : '训练') + "已启动：" + r.name + (r.output_dir ? '\n保存到：' + r.output_dir : ''), "#trainAlert");
       A.refreshStatus();
     }, "#trainAlert");
   });
   A.click("btnStop", function () {
     A.action(async function () {
       await A.stop();
-      A.ok("急停已下发", "#trainAlert");
+      A.ok("已请求停止；归零任务会从当前位置慢速收工", "#trainAlert");
       A.refreshStatus();
     }, "#trainAlert");
   });
   function syncBaseModelRow() {
     var row = A.el("baseModelRow");
     if (!row) return;
-    var isVla = A.el("l_policy_type").value === "smolvla";
-    row.style.display = isVla ? "" : "none";
+    var fine = str('l_training_mode') === 'finetune';
+    row.hidden = !fine;
+    A.el('trainingModeHint').textContent = fine ? '加载已有权重，用所选数据集继续学习；新建优化器和输出目录，原模型保留。' : '从零初始化策略，训练一个新模型；不加载下方保存的模型路径。';
+    A.el('trainingStepsLabel').textContent = fine ? '本次微调步数' : '训练步数';
+    A.el('btnTrain').textContent = selected === 'lerobot' && fine ? '开始微调' : '开始训练';
+    A.el('l_learning_rate').disabled = str('l_policy_type') !== 'act';
   }
   A.change("l_policy_type", function () {
     syncBaseModelRow();
     var v = A.el("l_policy_type").value;
     if (v === "smolvla") {
+      A.el('l_training_mode').value='finetune';syncBaseModelRow();
       if (!A.el("l_base_model").value.trim()) {
         A.el("l_base_model").value = "lerobot/smolvla_base";
       }
@@ -521,10 +570,15 @@
       if (Number(A.el("l_batch_size").value) === 0) A.el("l_batch_size").value = 8;
     }
     updateDep();
+    populateCheckpoints();invalidateInspection();
     updateModelCacheStatus();
   });
-  A.change("l_base_model", function () { updateDep(); updateModelCacheStatus(); });
+  A.change("l_base_model", function () { updateDep(); populateCheckpoints(); invalidateInspection(); updateModelCacheStatus(); });
+  A.change('l_training_mode',function(){updateDep();updateModelCacheStatus();invalidateInspection();});
+  A.change('l_checkpoint',function(){if(str('l_checkpoint'))selectCheckpoint(str('l_checkpoint'));});
+  A.click('btnInspectFinetune',function(){A.action(inspectFinetune,'#trainAlert');});
   A.change("l_repo_id", function () {
+    invalidateInspection();
     A.action(function () { return syncDatasetDirFromRepo(true); }, "#trainAlert");
   });
 
@@ -534,8 +588,8 @@
       var list = await loadCheckpoints();
       var def = "";
       for (var i = 0; i < list.length; i++) { if (list[i].config) { def = list[i].config; break; } }
-      var p = await A.prompt("恢复 LeRobot 训练需要 train_config.json 路径：", def,
-        { title: "恢复训练" });
+      var p = await A.prompt("断点续训会恢复原任务的步数、优化器及数据集。新增数据请选择‘在已有模型上微调’。\n请输入原任务 train_config.json 路径：", def,
+        { title: "断点续训原任务" });
       if (!p) return;
       await A.api.post("/api/train/resume", { config_path: p });
       A.ok("恢复训练已启动", "#trainAlert");
@@ -549,6 +603,7 @@
     A.el("o_dataset_dir").value = v;
     // 同时填到 LeRobot 的「数据集目录」，避免两个目录概念混淆
     A.el("l_dataset_dir").value = v;
+    invalidateInspection();
     A.el("dsDirInfo").textContent = "当前目录：" + v;
     A.saveConfig({ train: { dataset_dir: v, repo_id: v.replace(/\/+$/, "").split("/").pop() } })
       .then(function () { updateDep(); })
@@ -558,8 +613,9 @@
   A.click("btnFillDs", function () {
     A.action(function () { return syncDatasetDirFromRepo(true); }, "#trainAlert");
   });
-  A.click("btnClearLoss", function () { losses = []; draw(); });
+  A.click("btnClearLoss", function () { series.clear();draw(); });
   A.click("btnReloadCkpt", function () { loadCheckpoints(); });
+  A.click('btnRefreshModels',function(){A.action(loadCheckpoints,'#trainAlert');});
 
   A.onStatus(function (s) {
     if (s) A.el("trainState").textContent = s.running
@@ -568,16 +624,10 @@
   A.onTheme(function () { draw(); });
   window.addEventListener("resize", draw);
   A.onLog(function (ev) {
-    if (ev.type === "loss" && typeof ev.value === "number") {
-      losses.push({ step: Number(ev.step) || losses.length, value: ev.value });
-      if (losses.length > 600) losses.shift();
-      draw();
-    }
+    if(series.add(ev))draw();
   });
   A.logs().forEach(function (ev) {
-    if (ev.type === "loss" && typeof ev.value === "number") {
-      losses.push({ step: Number(ev.step) || losses.length, value: ev.value });
-    }
+    series.add(ev);
   });
   draw();
 
@@ -587,7 +637,8 @@
   await loadCheckpoints();
 
   function applyTraining(c) {
-    var maps={train:{repo_id:'l_repo_id',policy_type:'l_policy_type',dataset_dir:'l_dataset_dir',base_model:'l_base_model',steps:'l_steps',batch_size:'l_batch_size',device:'l_device',output_dir:'l_output_dir',job_name:'l_job_name',wandb:'l_wandb',video_backend:'l_video_backend'},
+    var previous=JSON.stringify([str('l_base_model'),str('l_policy_type'),str('l_repo_id'),str('l_dataset_dir')]);
+    var maps={train:{training_mode:'l_training_mode',learning_rate:'l_learning_rate',repo_id:'l_repo_id',policy_type:'l_policy_type',dataset_dir:'l_dataset_dir',base_model:'l_base_model',steps:'l_steps',batch_size:'l_batch_size',device:'l_device',output_dir:'l_output_dir',job_name:'l_job_name',wandb:'l_wandb',video_backend:'l_video_backend'},
       yolo:{data_yaml:'y_data_yaml',dataset_dir:'y_dataset_dir',model:'y_model',epochs:'y_epochs',imgsz:'y_imgsz',batch:'y_batch',device:'y_device',output_dir:'y_output_dir'},
       opencv:{dataset_dir:'o_dataset_dir',classifier:'o_classifier',epochs:'o_epochs',img_size:'o_img_size',output_dir:'o_output_dir'}};
     Object.keys(maps).forEach(function(section){var values=c[section]||{};Object.keys(maps[section]).forEach(function(key){
@@ -596,6 +647,9 @@
       else if(n.tagName!=='SELECT'||Array.from(n.options).some(function(o){return o.value===String(values[key]);})){if(n.value!==String(values[key]))n.value=values[key];}
     });});
     if(c.train&&['lerobot','yolo','opencv'].indexOf(c.train.backend)>=0)selectEngine(c.train.backend);
+    if(c.train&&!c.train.training_mode)A.el('l_training_mode').value=c.train.base_model?'finetune':'scratch';
+    syncBaseModelRow();populateCheckpoints();
+    if(previous!==JSON.stringify([str('l_base_model'),str('l_policy_type'),str('l_repo_id'),str('l_dataset_dir')]))invalidateInspection();
   }
   trainAutosave=A.autosave.bind({id:'training',root:'#page',
     read:function(){return {train:Object.assign({backend:selected},buildParams('lerobot')),yolo:buildParams('yolo'),opencv:buildParams('opencv')};},

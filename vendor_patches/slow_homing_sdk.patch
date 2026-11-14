@@ -1,0 +1,297 @@
+--- a/rebot_grasp/sdk/reBotArm_control_py/reBotArm_control_py/controllers/rebotarm_endpose_controller.py
++++ b/rebot_grasp/sdk/reBotArm_control_py/reBotArm_control_py/controllers/rebotarm_endpose_controller.py
+@@ -128,18 +128,22 @@
+ 
+     def start(self) -> None:
+         self.rebotarm.connect()
++        measured=self._home_measurement()
++        self._q_target[:]=measured[:self._n];self._qd_target[:]=0.
++        if self._has_gripper:self._gripper_target=float(measured[self._n])
+         if self._arm_group:
+-            if self._arm_control_mode == "mit":
+-                self._arm_group.mode_mit(
+-                    kp=self._arm_group._mit_kp,
+-                    kd=self._arm_group._mit_kd,
+-                )
++            if self._arm_control_mode=='mit':
++                ok=self._arm_group.mode_mit(kp=self._arm_group._mit_kp,kd=self._arm_group._mit_kd)
++                if not ok:raise RuntimeError('arm MIT mode not confirmed; not enabling')
++                self._arm_group.send_mit(self._q_target,vel=np.zeros(self._n))
+             else:
+-                self._arm_group.mode_pos_vel()
++                if not self._arm_group.mode_pos_vel():raise RuntimeError('arm POS_VEL mode not confirmed; not enabling')
++                self._arm_group.send_pos_vel(self._q_target,vlim=np.full(self._n,.15))
++            if self._has_gripper:
++                if not self._gripper_group.mode_mit():raise RuntimeError('gripper mode not confirmed; not enabling')
++                self._gripper_group.send_mit(np.array([self._gripper_target]))
+             self._arm_group.enable()
+-        if self._has_gripper:
+-            self._gripper_group.mode_mit()
+-            self._gripper_group.enable()
++        if self._has_gripper:self._gripper_group.enable()
+         self.rebotarm.start_control_loop(self._loop_cb)
+         self._running = True
+ 
+@@ -172,59 +176,67 @@
+         if self._has_gripper:
+             self._gripper_target = 0.0
+ 
+-    def safe_home(
+-        self,
+-        max_vel: float = 0.5,
+-        send_freq: float = 50.0,
+-        settle_thresh: float = 0.01,
+-        timeout: float = 15.0,
+-    ) -> None:
+-        if not self._running:
+-            return
+-
+-        q_curr, _, _ = self.rebotarm.get_state()
+-        q_curr = q_curr[: self._n]
+-        q_start = q_curr.copy()
+-
+-        home_pos = np.zeros(self._n)
+-        q_err = np.abs(home_pos - q_start)
+-        max_err = float(np.max(q_err))
+-        if max_err < 0.01:
+-            return
+-
+-        t_ramp = max_err / max_vel
+-        t_total = t_ramp * 2.0
+-        dt_send = 1.0 / send_freq
+-        num_steps = max(2, int(t_total / dt_send))
+-
+-        t = np.linspace(0, t_total, num_steps)
+-        traj = np.zeros((num_steps, self._n))
+-        for i in range(self._n):
+-            err_i = home_pos[i] - q_start[i]
+-            s = t / t_total
+-            # 最小jerk (minimum jerk) 轨迹:
+-            #   q(s) = q0 + Δq * (10s³ - 15s⁴ + 6s⁵)
+-            # 速度: v(s) = Δq/t_total * (30s² - 60s³ + 30s⁴) → 在 s=0 和 s=1 处均为零
+-            traj[:, i] = q_start[i] + err_i * (10.0 * s ** 3 - 15.0 * s ** 4 + 6.0 * s ** 5)
+-
+-        interval = t_total / num_steps if num_steps > 0 else dt_send
+-        deadline = time.monotonic() + timeout
+-        self._vlim_override = np.full(self._n, max_vel, dtype=np.float64)
+-        for i in range(num_steps):
+-            if time.monotonic() > deadline:
+-                print("[safe_home] 轨迹发送超时")
+-                break
+-            self._q_target[:] = traj[i]
+-            time.sleep(interval)
+-
+-        self._q_target[:] = 0.0
+-        settle_deadline = time.monotonic() + 3.0
+-        while time.monotonic() < settle_deadline:
+-            q_now, _, _ = self.rebotarm.get_state()
+-            if np.max(np.abs(q_now[: self._n])) < settle_thresh:
+-                break
+-            time.sleep(self._dt)
+-        self._vlim_override = None
++    def _home_measurement(self):
++        # Bypass get_state()'s missing-feedback zero fallback.
++        self.rebotarm.get_state()  # Request/poll through the existing owner.
++        names=list(self._arm_group.joint_names)
++        if self._has_gripper:names+=list(self._gripper_group.joint_names)
++        values=[]
++        for name in names:
++            state=self.rebotarm._motor_map[name].get_state()
++            if state is None or not np.isfinite([state.pos,state.vel,state.t_mos,state.t_rotor]).all():
++                raise RuntimeError('safe_home: missing/invalid measured feedback: '+name)
++            if state.status_code not in (0,1) or max(state.t_mos,state.t_rotor)>80:
++                raise RuntimeError('safe_home: fault/temperature: '+name)
++            values.append(state.pos)
++        return np.asarray(values,dtype=float)
++
++    def safe_home(self,max_vel=.15,send_freq=50.,settle_thresh=.02,timeout=15.) -> None:
++        """Measured-pose return with bounded velocity and acceleration.
++
++        A timeout/obstruction holds the measured pose; it never sends a final
++        zero target to catch up. No second trajectory thread can overwrite it.
++        """
++        from .homing_profile import trajectory
++        if not self._running:return
++        if not np.isfinite([max_vel,send_freq,settle_thresh,timeout]).all() or not 0<max_vel<=5. or not 10<=send_freq<=100 or not 0<settle_thresh<=.035 or timeout<=0:
++            raise ValueError('Invalid slow homing limits')
++        max_vel=min(max_vel,.15)
++        self._stop_send.set()
++        if self._send_thread is not None:
++            self._send_thread.join(timeout=2.)
++            if self._send_thread.is_alive():raise RuntimeError('previous trajectory has not stopped')
++        measured=self._home_measurement()
++        if np.max(abs(measured))>4*np.pi:raise RuntimeError('safe_home: multi-turn offset outside range')
++        def target(q):
++            self._q_target[:]=q[:self._n]
++            self._qd_target[:]=0.
++            if self._has_gripper:self._gripper_target=float(q[self._n])
++        target(measured);self._vlim_override=np.full(self._n,max_vel)
++        stages=[(0,3,4,5),(1,2)] if self._n==6 else [tuple(range(self._n))]
++        if self._has_gripper:stages.append((self._n,))
++        try:
++            for active in stages:
++                measured=self._home_measurement();q=measured.copy();previous=q.copy();target(q)
++                for interval,point in trajectory([q[i] for i in active],[0.]*len(active),speed=max_vel,hz=send_freq):
++                    measured=self._home_measurement()
++                    if np.max(abs(measured-previous))>.10:raise RuntimeError('safe_home following error; stopped at measured pose')
++                    for i,v in zip(active,point):q[i]=v
++                    target(q);previous=q.copy();time.sleep(interval)
++                deadline=time.monotonic()+max(3.,min(timeout,15.));settled=0
++                while time.monotonic()<deadline:
++                    measured=self._home_measurement();target(q)
++                    settled=settled+1 if max(abs(measured[i]) for i in active)<settle_thresh else 0
++                    if settled>=8:break
++                    time.sleep(1/send_freq)
++                else:raise RuntimeError('safe_home not settled; not disabling')
++        except BaseException:
++            try:target(self._home_measurement())
++            except Exception:pass
++            raise
++        finally:
++            self._vlim_override=None
++            self._stop_send.clear()
+ 
+     def move_to_ik(
+         self,
+--- a/rebot_grasp/sdk/reBotArm_control_py/reBotArm_control_py/controllers/gravity_compensation.py
++++ b/rebot_grasp/sdk/reBotArm_control_py/reBotArm_control_py/controllers/gravity_compensation.py
+@@ -251,70 +251,47 @@
+     # safe shutdown — minimum-jerk home before disconnect
+     # ------------------------------------------------------------------
+ 
+-    def safe_home(
+-        self,
+-        max_vel: float = 0.5,
+-        send_freq: float = 50.0,
+-        settle: float = 0.5,
+-        timeout: float = 15.0,
+-    ) -> None:
+-        """Minimum-jerk 归零轨迹 + 重力前馈。
+-
+-        从当前位置平滑运动到零位，使用刚性增益保持稳定。
+-        应在 ``end()`` 之后、``disconnect()`` 之前调用。
+-        """
+-        if self._hold_kp is None:
+-            raise RuntimeError("safe_home() 需先调用 start()")
+-        robot = self.rebotarm
+-        q_hold = robot.arm.get_positions().copy()
+-        n = robot.arm.num_joints
+-        home = np.zeros(n)
+-        kp = self._hold_kp
+-        kd = self._hold_kd
+-
+-        # Hold current position briefly to stabilize before moving.
+-        tau_hold = self._gravity_comp_torque(q_hold)
+-        robot.arm.send_mit(q_hold, vel=np.zeros(n), kp=kp, kd=kd, tau=tau_hold)
+-        if robot.has_gripper:
+-            robot.gripper.send_mit(robot.gripper.get_positions())
+-        time.sleep(0.3)
+-
+-        q_err = np.abs(home - q_hold)
+-        max_err = float(np.max(q_err))
+-        if max_err < 0.01:
+-            return
+-
+-        t_ramp = max_err / max_vel
+-        t_total = t_ramp * 2.0
+-        dt_send = 1.0 / send_freq
+-        num_steps = max(2, int(t_total / dt_send))
+-        interval = t_total / num_steps
+-
+-        deadline = time.monotonic() + timeout
+-        print(
+-            f"[safe_home] 归零轨迹 / homing trajectory: "
+-            f"{num_steps} steps @ {send_freq:.0f} Hz, {t_total:.1f}s"
+-        )
+-        for i in range(num_steps):
+-            if time.monotonic() > deadline:
+-                print("[safe_home] 超时 / timeout")
+-                break
+-            s = (i + 1) / num_steps
+-            # Minimum-jerk: q(s) = q0 + Δq * (10s³ - 15s⁴ + 6s⁵)
+-            q_traj = q_hold + (home - q_hold) * (
+-                10.0 * s ** 3 - 15.0 * s ** 4 + 6.0 * s ** 5
+-            )
+-            tau_traj = self._gravity_comp_torque(q_traj)
+-            robot.arm.send_mit(
+-                q_traj, vel=np.zeros(n), kp=kp, kd=kd, tau=tau_traj
+-            )
+-            if robot.has_gripper:
+-                robot.gripper.send_mit(robot.gripper.get_positions())
+-            time.sleep(interval)
+-
+-        # Settle at zero before cutting power.
+-        robot.arm.send_mit(home, vel=np.zeros(n), kp=kp, kd=kd, tau=np.zeros(n))
+-        time.sleep(settle)
++    def safe_home(self,max_vel=.15,send_freq=50.,settle=.5,timeout=15.) -> None:
++        """Slow current-pose return, preserving gravity feedforward on every step."""
++        from .homing_profile import trajectory
++        if self._hold_kp is None:raise RuntimeError('safe_home requires start first')
++        if not 0<max_vel<=5. or not 10<=send_freq<=100:raise ValueError('Invalid home limits')
++        max_vel=min(max_vel,.15);robot=self.rebotarm;n=robot.arm.num_joints
++        def measured():
++            robot.get_state();values=[]
++            names=list(robot.arm.joint_names)
++            if robot.has_gripper:names+=list(robot.gripper.joint_names)
++            for name in names:
++                st=robot._motor_map[name].get_state()
++                if st is None or not np.isfinite([st.pos,st.vel,st.t_mos,st.t_rotor]).all() or st.status_code not in (0,1) or max(st.t_mos,st.t_rotor)>80:
++                    raise RuntimeError('safe_home missing/invalid feedback: '+name)
++                values.append(st.pos)
++            return np.asarray(values)
++        def send(q):
++            robot.arm.send_mit(q[:n],vel=np.zeros(n),kp=self._hold_kp,kd=self._hold_kd,tau=self._gravity_comp_torque(q[:n]))
++            if robot.has_gripper:robot.gripper.send_mit(q[n:])
++        q=measured();send(q)
++        stages=[(0,3,4,5),(1,2)] if n==6 else [tuple(range(n))]
++        if robot.has_gripper:stages.append((n,))
++        try:
++            for active in stages:
++                q=measured();previous=q.copy()
++                for interval,point in trajectory([q[i] for i in active],[0.]*len(active),speed=max_vel,hz=send_freq):
++                    now=measured()
++                    if np.max(abs(now-previous))>.10:raise RuntimeError('safe_home following error')
++                    for i,v in zip(active,point):q[i]=v
++                    send(q);previous=q.copy();time.sleep(interval)
++                deadline=time.monotonic()+max(3.,min(timeout,15.));count=0
++                while time.monotonic()<deadline:
++                    now=measured();send(q);count=count+1 if max(abs(now[i]) for i in active)<.025 else 0
++                    if count>=8:break
++                    time.sleep(1/send_freq)
++                else:raise RuntimeError('safe_home not settled; no final jump or disable')
++            time.sleep(max(0.,min(settle,3.)))
++        except BaseException:
++            try:send(measured())
++            except Exception:pass
++            raise
+ 
+     def _loop_cb(self, robot: RebotArm, dt: float) -> None:
+         del dt
+--- a/rebot_grasp/sdk/reBotArm_control_py/reBotArm_control_py/controllers/homing_profile.py
++++ b/rebot_grasp/sdk/reBotArm_control_py/reBotArm_control_py/controllers/homing_profile.py
+@@ -0,0 +1,25 @@
++"""Hardware-free, velocity/acceleration bounded minimum-jerk homing samples.
++
++This file is mirrored into the standalone vendor drivers for their CLI entrypoints.
++A scheduler delay never skips samples or jumps to the final target.
++"""
++import math
++
++HOME_SPEED_RAD_S=.15
++HOME_ACCEL_RAD_S2=.20
++HOME_HZ=50.
++
++
++def trajectory(start,target,*,speed=HOME_SPEED_RAD_S,acceleration=HOME_ACCEL_RAD_S2,hz=HOME_HZ,min_duration=2.):
++    start=tuple(float(v) for v in start);target=tuple(float(v) for v in target)
++    if len(start)!=len(target) or not start or not all(math.isfinite(v) for v in start+target):
++        raise ValueError('归零需要完整的有限实测角度')
++    if not all(math.isfinite(v) for v in (speed,acceleration,hz,min_duration)) or not 0<speed<=.3 or not 0<acceleration<=.4 or not 10<=hz<=100 or min_duration<0:
++        raise ValueError('归零速度、加速度或采样频率无效')
++    delta=max(abs(b-a) for a,b in zip(start,target))
++    # Peak first derivative=1.875, peak second derivative=10/sqrt(3).
++    duration=max(min_duration,1.875*delta/speed,math.sqrt((10/math.sqrt(3))*delta/acceleration))
++    steps=max(1,math.ceil(duration*hz));interval=duration/steps
++    for step in range(steps+1):
++        s=step/steps;blend=s*s*s*(10+s*(-15+6*s))
++        yield interval,tuple(a+(b-a)*blend for a,b in zip(start,target))

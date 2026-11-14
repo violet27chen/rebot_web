@@ -738,33 +738,10 @@ class RebotArm:
             time.sleep(duration + extra)
 
     def safe_home(self, duration: float = 3.0) -> None:
-        """回零位（关节全部归零）。"""
-        if self._endpos_ctrl is None:
-            raise RuntimeError("未连接机械臂，请先调用 connect()")
-        ctrl = self._endpos_ctrl
-        ctrl._stop_send.set()
-        if ctrl._send_thread is not None:
-            ctrl._send_thread.join(timeout=2.0)
-        ctrl._stop_send.clear()
-
-        q_now = self.get_joint_positions()
-        max_delta = float(np.max(np.abs(q_now))) if q_now.size else 0.0
-        duration_s = max(float(duration), 0.2)
-        home_vlim = float(np.clip(max(max_delta / duration_s, 0.3), 0.3, 0.8))
-        ctrl._vlim_override = np.full(self._arm.num_joints, home_vlim, dtype=np.float64)
-        ctrl._q_target[:] = 0.0
-
-        deadline = time.monotonic() + max(max_delta / home_vlim + 3.0, duration_s + 3.0, 6.0)
-        try:
-            while time.monotonic() < deadline:
-                q_check = self._arm.get_positions(request=True)
-                if q_check.size and float(np.max(np.abs(q_check))) < 0.03:
-                    return
-                time.sleep(0.05)
-            print("[RebotArm] safe_home timeout")
-        finally:
-            ctrl._vlim_override = None
-            ctrl._stop_send.clear()
+        """Use the shared measured-pose, bounded-speed controller return."""
+        if self._endpos_ctrl is None:raise RuntimeError('未连接机械臂')
+        self._g_stop_loop()
+        self._endpos_ctrl.safe_home(max_vel=.15,timeout=max(8.,float(duration)))
 
     # ── 上下文管理器 ──────────────────────────────────────────────────────────
 

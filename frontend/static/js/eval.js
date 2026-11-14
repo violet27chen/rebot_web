@@ -2,7 +2,7 @@
 (async function () {
   "use strict";
   var A = window.APP;
-  await A.init({ active: "eval", title: "策略评估", subtitle: "用训练好的检查点驱动真机" });
+  await A.init({ active: "eval", title: "快递分拣", subtitle: "定位 → 翻面 / 扫码 → 面单朝上与单号确认 → 分类出料" });
   A.attachLogPanel(A.el("logPanel"));
 
   function ckptLabel(p) {
@@ -99,13 +99,18 @@
   A.click("btnEvalStop", function () {
     A.action(async function () {
       await A.stop();
-      A.ok("急停已下发", "#evalAlert");
+      A.ok("已请求停止；归零任务会从当前位置慢速收工", "#evalAlert");
     }, "#evalAlert");
   });
+  A.click('btnEvalHomeDisable',function(){A.action(async function(){
+    var host=window.parent!==window?window.parent:window;
+    if(!host.JOB_CONSOLE||!host.JOB_CONSOLE.finishEvaluation)throw new Error('请刷新控制台加载一键收工功能');
+    var result=await host.JOB_CONSOLE.finishEvaluation();
+    if(result)A.ok('已启动慢速收工归零并失能，进度见全局任务日志','#evalAlert');
+  },'#evalAlert');});
 
   await loadConfig();
   A.autosave.form('evalForm','eval');
   A.autosave.onConfig(function(){A.commandPreview('eval','#workflowCommand');});
   A.commandPreview('eval','#workflowCommand');
-document.dispatchEvent(new Event('rebot:eval-ready'));
 })();

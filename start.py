@@ -56,7 +56,8 @@ IS_WINDOWS = os.name == "nt"
 # multipart 不能少：FastAPI 的 UploadFile / File 路由缺它会在导入后端时直接失败
 WEB_MODULES = (("fastapi", "fastapi"), ("uvicorn", "uvicorn"),
                ("serial", "pyserial"), ("websockets", "websockets"),
-               ("multipart", "python-multipart"))
+               ("multipart", "python-multipart"), ("cv2", "opencv-python"),
+               ("numpy", "numpy"), ("yaml", "PyYAML"), ("zxingcpp", "zxing-cpp"))
 
 
 def ensure_web_deps() -> None:

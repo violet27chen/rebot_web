@@ -151,7 +151,7 @@
   A.click("btnStop", function () {
     A.action(async function () {
       await A.stop();
-      A.ok("急停已下发", "#setupAlert");
+      A.ok("已请求停止；归零任务会从当前位置慢速收工", "#setupAlert");
       A.refreshStatus();
     }, "#setupAlert");
   });
@@ -160,4 +160,5 @@
   A.autosave.form('setupForm','setup');
   await loadCommands();
   A.autosave.preferences(['setupEnvName', 'setupEnvPy']);
+  document.dispatchEvent(new Event('rebot:setup-ready'));
 })();

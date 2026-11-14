@@ -16,7 +16,7 @@ cfg.dual_arm.enabled=true;cfg.dual_arm.robot_type=cfg.dual_arm.teleop_type='seee
 cfg.dual_arm.left.follower_port='/dev/qa-left';cfg.dual_arm.right.follower_port='/dev/qa-right';
 cfg.cameras=[];
 let revision=1,job=null,logTime=Date.now()/1000,zeroServiceMissing=false,zeroStartMissing=false,zeroResultMissing=false;
-const sockets=new Set(),inputs=[],motion=[],zero=[];
+const sockets=new Set(),inputs=[],motion=[],zero=[],stops=[];
 function merge(a,b){if(!b||typeof b!=='object'||Array.isArray(b))return b;for(const k of Object.keys(b))a[k]=merge(a[k]||{},b[k]);return a;}
 function event(state){logTime=Math.max(Date.now()/1000,logTime+.001);const data={type:'state',ts:logTime,...state};for(const s of sockets)s.send(JSON.stringify(data));}
 function updateJob(j){job=j;event(j?{...j,job:j.name,running:true}:{running:false,action:'finish',exit_code:0});}
@@ -64,6 +64,7 @@ function status(){return {status_ts:Date.now()/1000,running:!!job,job:job?{...jo
      if(!job||payload.job_id!==job.job_id)return route.fulfill({status:409,json:{error:'stale task'}});
      updateJob({...job,awaiting_input:false});return json({ok:true});
     }
+    if(p==='/api/stop'){stops.push(p);updateJob(null);return json({ok:true});}
     if(p==='/api/devices/home-and-disable'){
      motion.push(p);updateJob({job_id:'home-test',prompt_id:0,name:'收工归零并失能',kind:'home-and-disable',awaiting_input:false});
      return json({ok:true,name:'收工归零并失能'});
@@ -145,6 +146,17 @@ function status(){return {status_ts:Date.now()/1000,running:!!job,job:job?{...jo
   assert.deepEqual(motion,['/api/devices/home-and-disable']);assert.equal(await page.locator('#btnHomeDisable').isDisabled(),true);
   updateJob(null);await page.waitForFunction(()=>!document.querySelector('#btnHomeDisable').disabled,null,{timeout:10000});
   console.log('PASS global prompts and confirmed homing');
+  await page.setViewportSize({width:1440,height:1000});
+  await page.locator('.nav a[href="/p/eval"]').click();await frame.locator('summary').filter({hasText:'高级：独立 ACT 真机评估'}).click();await frame.locator('#btnEvalHomeDisable').waitFor();
+  updateJob({job_id:'eval-finish-test',name:'策略评估',kind:'eval',awaiting_input:false});
+  await frame.locator('#btnEvalHomeDisable').click();await page.locator('.notify-modal.confirm [data-cancel]').click();
+  assert.equal(stops.length,0);assert.equal(motion.length,1);
+  await frame.locator('#btnEvalHomeDisable:not([data-action-busy])').click();await page.locator('.notify-modal.confirm [data-ok]').click();
+  await page.waitForFunction(()=>document.querySelector('#btnHomeDisable').disabled);
+  for(let n=0;n<60&&motion.length<2;n++)await page.waitForTimeout(20);
+  assert.equal(stops.length,1);assert.equal(motion.length,2);updateJob(null);
+  console.log('PASS evaluation home button confirms, stops evaluation first, waits for idle then homes; cancel sends no motion');
+
   await page.setViewportSize({width:1440,height:1000});
   await page.locator('.nav a[href="/p/viewer"]').click();await page.waitForURL('**/p/viewer');
   await frame.locator('#videos video').nth(2).waitFor();

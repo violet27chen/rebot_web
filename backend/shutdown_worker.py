@@ -14,16 +14,18 @@ import sys
 import time
 try:
     from .motor_mode import ensure_mode_checked
+    from .homing_profile import trajectory, HOME_SPEED_RAD_S
 except ImportError:
     from motor_mode import ensure_mode_checked
+    from homing_profile import trajectory, HOME_SPEED_RAD_S
 
 
 def home_arm(bus, motors, *, position_mode, force_mode, ratio=.12,
-             speed=.35, sleep=time.sleep, clock=time.monotonic, log=print, publish=None):
+             speed=HOME_SPEED_RAD_S, sleep=time.sleep, clock=time.monotonic, log=print, publish=None):
     """Use raw motor radians and the follower's established two-stage order."""
     if set(motors) != set(range(1, 8)):
         raise ValueError('收工要求完整的六轴与夹爪反馈（CAN ID 1～7）')
-    if not .01 <= ratio <= 1 or not 0 < speed <= .5:
+    if not .01 <= ratio <= 1 or not 0 < speed <= .3:
         raise ValueError('无效的归零速度或夹爪力矩比例')
 
     def read():
@@ -76,22 +78,17 @@ def home_arm(bus, motors, *, position_mode, force_mode, ratio=.12,
     for label, active in [('底座与腕部', (1,4,5,6)), ('肩部与肘部', (2,3)), ('限力夹爪', (7,))]:
         log(f'[收工] {label}低速归零', flush=True)
         states = read()
-        start = dict(target)
-        for i in active:
-            start[i] = states[i].pos
-        duration = max(1., max(abs(start[i]) for i in active)*1.875/speed)
-        began = clock()
-        while True:
-            elapsed = clock()-began
-            fraction = min(1., elapsed/duration)
-            eased = 10*fraction**3-15*fraction**4+6*fraction**5
-            for i in active:
-                target[i] = start[i]*(1-eased)
-            read()
-            send(target)
-            if fraction >= 1:
-                break
-            sleep(1/30)
+        # Every stage starts from fresh measured values, including held joints.
+        target = {i: state.pos for i,state in states.items()}
+        start = [target[i] for i in active]
+        previous = dict(target)
+        for interval, point in trajectory(start,[0.]*len(active),speed=speed,hz=30):
+            states=read()
+            if any(abs(states[i].pos-previous[i])>.10 for i in active):
+                send({i:state.pos for i,state in states.items()})
+                raise RuntimeError(f'{label}归零未到位，跟踪误差超过 0.10 rad；已停止继续收回')
+            for i,value in zip(active,point):target[i]=value
+            send(target);previous=dict(target);sleep(interval)
         settled=0; deadline=clock()+6
         while clock() < deadline:
             states=read();send(target)
@@ -151,7 +148,7 @@ def main():
             print(f"[收工] {arm['side']} · {arm['port']}",flush=True)
             home_arm(bus,motors,position_mode=Mode.POS_VEL,force_mode=Mode.FORCE_POS,
                      ratio=arm['gripper_torque_ratio'],
-                     publish=lambda q,t:publisher.send(arm['port'],q,t))
+                     publish=lambda q,t:publisher.send(arm['port'],q,t,gripper=motors[7].get_state().pos))
         print('[收工] 所有从臂归零、失能完成，正在释放串口；可重新连接启动',flush=True)
     except Exception as error:
         print(f'[收工失败] {error}',flush=True)

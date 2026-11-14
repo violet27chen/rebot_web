@@ -56,6 +56,9 @@ from backend.monitor_geometry import resolve_monitor_geometry
 from backend.device_release import device_paths, kill_device_owners
 from backend.vision_process import VisionProcess
 from backend.telemetry import Telemetry
+from backend.training import training_mode, prepare_finetune, read_policy
+from backend.training_metrics import numeric_step, parse_metric
+from backend.model_evaluation import prepare_evaluation
 from backend.raw_frames import frame_packet
 from backend.camera_manager import CameraManager, CameraError, source_key, list_devices, validate_configs
 
@@ -212,10 +215,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "hf": {"endpoint": "", "auto": True},
     "train": {"backend": "lerobot",
               "repo_id": "seeed_rebot_b601_dm/test", "dataset_dir": "",
-              "policy_type": "act", "base_model": "",
+              "policy_type": "act", "base_model": "", "training_mode": "", "learning_rate": 0,
               "output_dir": "outputs/train/act_rebot_test", "job_name": "act_rebot_test",
               "device": "cuda", "steps": 300000, "batch_size": 0, "wandb": False,
               "push_to_hub": False, "video_backend": "", "resume_config": ""},
+    "model_eval": {"base_model": "", "repo_id": "", "dataset_dir": "", "episodes": "",
+                   "max_samples": 200, "batch_size": 4, "device": "cpu", "video_backend": "pyav"},
     "yolo": {"data_yaml": "", "dataset_dir": "", "model": "yolov8n.pt",
              "camera_index": 0,
              "epochs": 50, "imgsz": 640, "batch": 8, "device": "cpu",
@@ -267,7 +272,7 @@ _INSTALL_COMMANDS_COMMON: list[dict[str, str]] = [
     {"group": "安装", "label": "安装幻尔主臂 + Seeed 从臂插件（清华源）",
      "cmd": f"pip install lerobot-teleoperator-rebot-arm-102 lerobot-robot-seeed-b601 motorbridge -i {PIP_INDEX}"},
     {"group": "安装", "label": "安装 Web / 相机依赖（清华源）",
-     "cmd": f"pip install fastapi uvicorn pyserial opencv-python numpy -i {PIP_INDEX}"},
+     "cmd": f"pip install fastapi uvicorn pyserial opencv-python numpy websockets python-multipart PyYAML zxing-cpp ultralytics -i {PIP_INDEX}"},
     {"group": "安装", "label": "安装 YOLO 训练依赖（清华源）",
      "cmd": f"pip install ultralytics -i {PIP_INDEX}"},
     {"group": "安装", "label": "安装 ffmpeg（文档要求 7.X）",
@@ -472,6 +477,9 @@ def save_config(patch: Optional[dict]) -> dict[str, Any]:
         finally:
             if temp_path and os.path.exists(temp_path):
                 os.unlink(temp_path)
+        telemetry=globals().get('TELEMETRY')
+        if telemetry is not None and any(k in (patch or {}) for k in ('dual_arm','follower')):
+            telemetry.configure(monitor_ports(cfg))
         hub = globals().get("HUB")
         if hub:
             hub.publish({"type": "config", "revision": CONFIG_FILE.stat().st_mtime_ns,
@@ -519,8 +527,9 @@ class LogHub:
     def state(self, **kw: Any) -> None:
         self.publish({"type": "state", **kw})
 
-    def loss(self, step: int, value: float) -> None:
-        self.publish({"type": "loss", "step": step, "value": round(value, 6)})
+    def loss(self, step: int, value: float, **metadata) -> None:
+        if math.isfinite(value):
+            self.publish({"type": "loss", "step": step, "value": round(value, 6), **metadata})
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=2000)
@@ -554,6 +563,7 @@ class Job:
     started_at: float = field(default_factory=time.time)
     job_id: str = field(default_factory=lambda: os.urandom(12).hex())
     prompt_id: int = 0
+    stopping: bool = False
     result: Optional[dict] = None
     finish_lock: threading.Lock = field(default_factory=threading.Lock)
     finished: threading.Event = field(default_factory=threading.Event)
@@ -926,7 +936,7 @@ def env_status() -> dict:
 LEROBOT_PLUGIN_DISTS = [
     "lerobot-teleoperator-rebot-arm-102", "lerobot-robot-seeed-b601", "motorbridge",
 ]
-LEROBOT_WEB_DISTS = ["fastapi", "uvicorn", "pyserial", "opencv-python", "numpy"]
+LEROBOT_WEB_DISTS = ["fastapi", "uvicorn", "pyserial", "opencv-python", "numpy", "websockets", "python-multipart", "PyYAML", "zxing-cpp", "ultralytics"]
 
 # -I 忽略 cwd / PYTHONPATH，避免把项目里同名 lerobot/ 源码目录误判成已安装；
 # 只查真实 site-packages 与发行包元数据，不真正 import（避免导入 torch 拖慢探测）。
@@ -951,7 +961,7 @@ try:
 except Exception:
     pass
 for n in ["lerobot", "lerobot-teleoperator-rebot-arm-102", "lerobot-robot-seeed-b601",
-          "motorbridge", "fastapi", "uvicorn", "pyserial", "opencv-python", "numpy"]:
+          "motorbridge", "fastapi", "uvicorn", "pyserial", "opencv-python", "numpy", "websockets", "python-multipart", "PyYAML", "zxing-cpp", "ultralytics"]:
     try:
         out["packages"][n] = metadata.version(n)
     except Exception:
@@ -1395,9 +1405,9 @@ def _terminate(proc: Optional[subprocess.Popen], graceful: bool = False) -> None
         elif graceful:
             os.killpg(os.getpgid(proc.pid), signal.SIGINT)
             try:
-                proc.wait(timeout=25)
+                proc.wait(timeout=1200)
             except subprocess.TimeoutExpired:
-                HUB.log("[stop] 正常收工超时，改为 SIGTERM", "warn")
+                HUB.log("[stop] 慢速收工超过 20 分钟，终止异常进程", "warn")
                 os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
                 try:
                     proc.wait(timeout=5)
@@ -1412,9 +1422,6 @@ def _terminate(proc: Optional[subprocess.Popen], graceful: bool = False) -> None
     except Exception as exc:  # noqa: BLE001
         HUB.log(f"[stop] 终止进程异常：{_brief(exc)}", "warn")
 
-
-LOSS_RE = re.compile(r"(?:loss|train_loss)[=:\s]*([0-9]*\.?[0-9]+(?:[eE][-+]?\d+)?)", re.I)
-STEP_RE = re.compile(r"(?:step|iteration|global_step)[=:\s]*(\d+)", re.I)
 
 # 终端在等用户回答的特征串。lerobot-calibrate / lerobot-teleoperate 用 input()
 # 打印 "Press ENTER when ready..."，需要网页把这一行识别出来并提示用户确认。
@@ -1467,7 +1474,7 @@ def _emit_job_line(job: Job, line: str) -> None:
     """记录一行真实输出 + 检测交互提示 + 推送日志，三处顺序保持一致。"""
     _record_line(job, line)
     _note_prompt(job, line)
-    _emit_line(line, job.kind)
+    _emit_line(line, job.kind, job)
 
 
 def _fmt_elapsed(sec: float) -> str:
@@ -1484,6 +1491,7 @@ def _job_progress(job: Job) -> dict[str, Any]:
             "job": job.name,
             "job_id": job.job_id,
             "prompt_id": job.prompt_id,
+            "stopping": job.stopping,
             "kind": job.kind,
             "step": job.step_index,
             "step_total": job.step_total,
@@ -1525,8 +1533,11 @@ def _progress_beats(job: Job, stop: threading.Event) -> None:
 
 def _record_line(job: Job, line: str) -> None:
     with STATE.lock:
-        if job.kind == 'zero-adjust' and line.startswith('REBOT_ZERO_RESULT '):
-            try:job.result=json.loads(line.removeprefix('REBOT_ZERO_RESULT '))
+        if job.kind == 'zero-adjust' and line.startswith(('REBOT_ZERO_RESULT ','REBOT_ZERO_ERROR ')):
+            try:job.result=json.loads(line.split(' ',1)[1])
+            except ValueError:pass
+        if job.kind == 'model-eval' and line.startswith('REBOT_MODEL_EVAL_RESULT '):
+            try:job.result=json.loads(line.split(' ',1)[1])
             except ValueError:pass
         job.last_line = str(line)[-180:]
         job.last_line_at = time.time()
@@ -1535,8 +1546,14 @@ def _record_line(job: Job, line: str) -> None:
 
 def _emit_line(line: str, kind: str, job: Optional[Job] = None) -> None:
     # 训练脚本输出的结构化指标：{"type":"metric","message":...,"step":...,"loss":...}
-    if job is not None:
-        _record_line(job, line)
+    def emit_metric(value, raw_step):
+        explicit = raw_step is not None
+        step = numeric_step(raw_step) if explicit else STATE.step_counter + 1
+        if not math.isfinite(value):
+            return
+        STATE.step_counter = max(STATE.step_counter, step)
+        unit = ('epoch' if job and job.kind == 'train' and '--epochs' in job.command else 'step') if explicit else 'metric'
+        HUB.loss(step, value, step_unit=unit, kind=kind, job_id=job.job_id if job else None)
     if line.startswith("{"):
         try:
             obj = json.loads(line)
@@ -1547,23 +1564,18 @@ def _emit_line(line: str, kind: str, job: Optional[Job] = None) -> None:
                 HUB.log(str(obj["message"]), "error" if obj["type"] == "error" else "info")
             if obj.get("loss") is not None:
                 try:
-                    step = int(obj.get("step") or STATE.step_counter)
-                    HUB.loss(step, float(obj["loss"]))
-                    STATE.step_counter = max(STATE.step_counter + 1, step + 1)
+                    emit_metric(float(obj['loss']), obj.get('step'))
                 except (TypeError, ValueError):
                     pass
             return
     HUB.log(line)
     if kind.startswith("train") or kind in ("eval", "shell"):
-        m = LOSS_RE.search(line)
-        if m:
-            sm = STEP_RE.search(line)
-            step = int(sm.group(1)) if sm else STATE.step_counter
-            STATE.step_counter = max(STATE.step_counter + 1, step + 1)
-            try:
-                HUB.loss(step, float(m.group(1)))
-            except ValueError:
-                pass
+        try:
+            metric = parse_metric(line)
+            if metric:
+                emit_metric(metric['value'], metric['step'])
+        except (ValueError, TypeError, OverflowError):
+            pass
 
 
 _WIN_PEEK_NAMED_PIPE: Optional[tuple] = None
@@ -1672,7 +1684,7 @@ def _pump_stream(job: Job, proc: subprocess.Popen, throttle: bool = True) -> Non
                 if is_progress:
                     last_progress_log = now
                 _note_prompt(job, line)
-                _emit_line(line, job.kind)
+                _emit_line(line, job.kind, job)
             # input("Press ENTER when ready...") 的提示不带换行，会一直卡在 buf 里，
             # 用户看不到「该按回车了」。识别到交互提示就立即推出，并清空 buf 防重复。
             if buf and b"\n" not in buf and b"\r" not in buf:
@@ -1767,6 +1779,8 @@ def _pump_stdout(job: Job) -> None:
 # 8. 命令构造（严格照抄 Seeed 文档）
 # ==================================================================
 def _lerobot(name: str) -> list[str]:
+    if name == 'lerobot-train':
+        return _py() + ['-u', str(TRAINERS_DIR / 'lerobot_train.py')]
     return LEROBOT_CMD_PREFIX + [_bin(name)]
 
 
@@ -1828,15 +1842,24 @@ def eval_policy_cameras(cfg: dict, policy_path: str) -> list[dict]:
     selected: list[dict] = []
     used: set[int] = set()
     for name in expected:
+        # B601's compound robot attaches shared cameras to the left sub-arm,
+        # then prefixes every observation with left_ (including right views).
+        bi_prefix = 'left_' if dual_enabled(cfg) and str((cfg.get('dual_arm') or {}).get('robot_type')) == 'bi_seeed_b601_dm_follower' else ''
+        source_name = name[len(bi_prefix):] if bi_prefix and name.startswith(bi_prefix) else name
         matches = [(i, camera) for i, camera in enumerate(configured)
-                   if i not in used and str(camera.get("name") or "") == name]
+                   if i not in used and str(camera.get("name") or "") == source_name]
+        if not matches and source_name == name and name.startswith(('left_', 'right_')):
+            # A single-arm evaluation may still consume a compound checkpoint.
+            alias = name.split('_', 1)[1]
+            matches = [(i, camera) for i, camera in enumerate(configured)
+                       if i not in used and str(camera.get('name') or '') == alias]
         if not matches:
-            number = re.fullmatch(r"cam(\d+)", name, re.IGNORECASE)
+            number = re.fullmatch(r"cam(\d+)", source_name, re.IGNORECASE)
             if number:
                 wanted = number.group(1)
 
                 def source_number(camera: dict) -> Optional[str]:
-                    source = str(camera.get("index_or_path") or "").strip()
+                    source = str(camera.get("index_or_path", "")).strip()
                     if source.isdigit():
                         return str(int(source))
                     match = re.fullmatch(r"/dev/video(\d+)", source)
@@ -1855,7 +1878,9 @@ def eval_policy_cameras(cfg: dict, policy_path: str) -> list[dict]:
                 "请在摄像头页将对应相机设为同名，或确认 camN 对应的视频设备编号。", 400)
         index, camera = matches[0]
         used.add(index)
-        selected.append({**camera, "name": name})
+        if bi_prefix and not name.startswith(bi_prefix):
+            raise ApiError(f'检查点相机键 {name} 与当前 B601 双臂前缀规则不一致，请使用匹配的机器人模式或数据集重新训练', 400)
+        selected.append({**camera, "name": source_name})
     return selected
 
 
@@ -2050,6 +2075,15 @@ def build_command(kind: str, cfg: dict, extra: Optional[dict] = None) -> list[st
             cfg, with_teleop=False) + [f"--dataset.repo_id={e.get('repo_id') or rp['repo_id']}",
                                        f"--dataset.episode={e.get('episode', rp['episode'])}"]
     if kind == "train":
+        try:
+            steps = float(tr['steps'])
+            batch = float(tr.get('batch_size') or 0)
+            if not math.isfinite(steps) or not steps.is_integer() or steps <= 0:
+                raise ValueError('训练步数必须为正整数')
+            if not math.isfinite(batch) or not batch.is_integer() or batch < 0:
+                raise ValueError('批大小必须为非负整数，0 表示默认')
+        except (ValueError, TypeError) as exc:
+            raise ApiError(f'训练参数无效：{exc}', 400) from exc
         ds_dir = str(tr.get("dataset_dir") or "").strip()
         if ds_dir:
             d = Path(ds_dir).expanduser()
@@ -2061,12 +2095,16 @@ def build_command(kind: str, cfg: dict, extra: Optional[dict] = None) -> list[st
             cmd = _lerobot("lerobot-train") + [f"--dataset.repo_id={repo_id}"]
         if tr.get("video_backend"):
             cmd.append(f"--dataset.video_backend={tr['video_backend']}")
-        base_model = str(tr.get("base_model") or "").strip()
+        try:
+            mode = training_mode(tr)
+            base_model = prepare_finetune(tr, ROOT, LEROBOT_HOME)[0] if mode == 'finetune' else ''
+        except ValueError as exc:
+            raise ApiError(str(exc), 400) from exc
         if base_model:
-            # 基于预训练 VLA 微调（如 lerobot/smolvla_base）：用 policy.path 而不是 policy.type
             cmd.append(f"--policy.path={base_model}")
-            # 预训练 VLA 的相机名/维度与本地数据集不同，用数据集特征覆盖，否则会 feature mismatch
-            feats = _dataset_policy_features(repo_id, ds_dir or None)
+            # ACT keeps its saved architecture and camera schema. Only VLA
+            # supports adapting the pretrained base to different dataset inputs.
+            feats = _dataset_policy_features(repo_id, ds_dir or None) if tr['policy_type'] == 'smolvla' else None
             if feats:
                 cmd.append("--policy.input_features=" + json.dumps(
                     feats["input"], ensure_ascii=False, separators=(",", ":")))
@@ -2078,9 +2116,19 @@ def build_command(kind: str, cfg: dict, extra: Optional[dict] = None) -> list[st
                 f"--job_name={tr['job_name']}", f"--policy.device={tr['device']}",
                 f"--wandb.enable={_fmt(tr.get('wandb', False))}",
                 f"--policy.push_to_hub={_fmt(tr.get('push_to_hub', False))}",
-                f"--steps={tr['steps']}"]
-        if int(tr.get("batch_size") or 0) > 0:
-            cmd.append(f"--batch_size={tr['batch_size']}")
+                f"--steps={int(steps)}"]
+        if batch > 0:
+            cmd.append(f"--batch_size={int(batch)}")
+        try:
+            lr = float(tr.get('learning_rate') or 0)
+        except (ValueError, TypeError) as exc:
+            raise ApiError('学习率必须为有效的非负数，0 表示沿用模型默认值', 400) from exc
+        if not math.isfinite(lr) or lr < 0:
+            raise ApiError('学习率必须为有效的非负数，0 表示沿用模型默认值', 400)
+        if lr and tr['policy_type'] == 'act':
+            cmd += [f'--policy.optimizer_lr={lr}', f'--policy.optimizer_lr_backbone={lr}']
+        elif lr:
+            raise ApiError('自定义微调学习率目前仅支持 ACT；其他策略请填 0', 400)
         return cmd
     if kind == "train-resume":
         return _lerobot("lerobot-train") + [
@@ -2281,7 +2329,7 @@ def setup_steps(which: str, cfg: dict, extra: Optional[dict] = None) -> list[tup
                            "lerobot-robot-seeed-b601", "motorbridge", *flags]))
             steps.append(("安装 Web / 相机依赖（清华源）",
                           [py, "-m", "pip", "install", "fastapi", "uvicorn", "pyserial",
-                           "opencv-python", "numpy", *flags]))
+                           "opencv-python", "numpy", "websockets", "python-multipart", "PyYAML", "zxing-cpp", "ultralytics", *flags]))
         if bool(e.get("with_ffmpeg", st.get("with_ffmpeg", False))):
             steps.append(("安装 ffmpeg（conda-forge）",
                           conda_cmd("install", "-y", "ffmpeg", "-c", "conda-forge",
@@ -2295,10 +2343,10 @@ def setup_steps(which: str, cfg: dict, extra: Optional[dict] = None) -> list[tup
 TRAIN_BACKENDS: dict[str, dict] = {
     "lerobot": {
         "label": "LeRobot · 模仿学习策略",
-        "engine": "官方 lerobot-train CLI（ACT / Diffusion / SmolVLA 微调）",
-        "desc": "用录制的数据集训练机械臂动作策略，产出 pretrained_model 检查点，可直接用于评估与异步推理。",
+        "engine": "官方 lerobot-train CLI（ACT / Diffusion / SmolVLA）",
+        "desc": "从头训练或加载已有策略微调，产出 pretrained_model 检查点；ACT 微调会检查动作维度和相机配置。",
         "needs": ["lerobot-train"], "deps": [],
-        "params": ["repo_id", "policy_type", "base_model", "steps", "batch_size", "device",
+        "params": ["repo_id", "dataset_dir", "policy_type", "base_model", "training_mode", "learning_rate", "steps", "batch_size", "device",
                    "output_dir", "job_name", "wandb", "video_backend"],
     },
     "yolo": {
@@ -2538,15 +2586,33 @@ def start_job(kind: str, name: str, cfg: dict, extra: Optional[dict] = None) -> 
 def start_train(backend: str, params: dict) -> dict:
     require_env()
     params = dict(params)
+    if STATE.running():
+        raise ApiError('已有任务运行中，请等待当前任务结束后再开始训练', 409)
     if backend == "lerobot" and not str(params.get("job_name") or "").strip():
         policy = re.sub(r"[^A-Za-z0-9_-]+", "_", str(params.get("policy_type") or "model")).strip("_")
         params["job_name"] = f"{policy or 'model'}_{time.strftime('%Y%m%d_%H%M%S')}"
     if backend == "lerobot":
+        candidate = _deep_merge(load_config()['train'], params)
+        try:
+            mode = training_mode(candidate)
+            if mode == 'finetune':
+                params['base_model'] = prepare_finetune(candidate, ROOT, LEROBOT_HOME)[0]
+                output = Path(str(candidate.get('output_dir') or f'outputs/train/{params["job_name"]}')).expanduser()
+                if not output.is_absolute():
+                    output = ROOT / output
+                if output.exists():
+                    # A new optimizer/run must never write into an old run.
+                    output = output.with_name(output.name + '_finetune_' + str(time.time_ns()))
+                params['output_dir'] = str(output)
+            params['training_mode'] = mode
+        except ValueError as exc:
+            raise ApiError(str(exc), 400) from exc
         patch = {"train": dict(params, backend=backend)}
     else:
         patch = {"train": {"backend": backend}, backend: params}
+    # Validate the whole command before persisting a new run configuration.
+    cmd = train_command(backend, _deep_merge(load_config(), patch), params)
     cfg = save_config(patch)
-    cmd = train_command(backend, cfg, params)
     # 双臂训练前真实读取数据集 meta：动作维度不匹配是最常见的失败原因
     if backend == "lerobot" and dual_enabled(cfg):
         try:
@@ -2564,9 +2630,11 @@ def start_train(backend: str, params: dict) -> dict:
         except ApiError as exc:
             HUB.log(f"[dual] 数据集校验跳过：{exc.detail}", "warn")
     env_extra = None
-    base = str(params.get("base_model") or "").strip()
+    base = str(params.get("base_model") or "").strip() if params.get('training_mode') == 'finetune' else ''
     if backend == "lerobot" and base:
-        cached, _ = _hf_model_cached(base)
+        cached = Path(base).is_dir()
+        if not cached:
+            cached, _ = _hf_model_cached(base)
         if cached:
             # 本地已经有模型：强制离线，绝不重复拉取
             env_extra = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
@@ -2585,6 +2653,9 @@ def start_train(backend: str, params: dict) -> dict:
                     env_extra=env_extra)
     if backend == "lerobot":
         result["job_name"] = params["job_name"]
+        result['training_mode'] = params['training_mode']
+        result['output_dir'] = cfg['train']['output_dir']
+        result['base_model'] = base
     return result
 
 
@@ -2712,17 +2783,27 @@ def start_chain(kind: str, name: str, steps: list[tuple[str, list[str]]], cfg: d
 
 
 def stop_all(force: bool = False) -> dict:
-    stopped = None
+    # Request graceful cleanup once, keep status/camera requests responsive while
+    # both arms complete their slow homing. A second click must not send SIGINT
+    # into an already running home and cut the trajectory short.
     with STATE.lock:
-        STATE.stop_event.set()
-        job = STATE.job
-        if job:
-            stopped = job.name
-            job.progress_stop.set()
-            _terminate(job.proc, graceful=not force)
-    HUB.log(f"[{'急停' if force else '停止'}] 正在停止：{stopped or '无运行任务'}", "warn")
-    HUB.state(running=False, job=None, action="stop", exit_code=130, refresh_env=True)
-    return ok(stopped=stopped)
+        STATE.stop_event.set();job=STATE.job
+        if not job or job.finished.is_set():return ok(stopped=None,stopping=False)
+        if job.stopping and not force:return ok(stopped=job.name,stopping=True)
+        job.stopping=True;stopped=job.name
+        if not force:
+            def cleanup():
+                _terminate(job.proc,graceful=True)
+                if job.proc and job.proc.poll() is not None:_finish_job_once(job,job.proc.returncode)
+            threading.Thread(target=cleanup,daemon=True,name='slow-stop-'+job.kind).start()
+            HUB.log('[停止] 已请求结束动作；如任务需要归零，将从实测当前位置慢速收工，请等待进度完成','warn')
+            publish_progress(job,'stopping')
+            return ok(stopped=stopped,stopping=True)
+    # Explicit forced release remains immediate and never starts a home motion.
+    _terminate(job.proc,graceful=False)
+    if job.proc and job.proc.poll() is not None:_finish_job_once(job,job.proc.returncode)
+    HUB.log('[急停] 已终止：'+stopped,'warn')
+    return ok(stopped=stopped,stopping=False)
 
 
 def write_job_input(text: str, job_id: Optional[str] = None, prompt_id: Optional[int] = None) -> dict:
@@ -2831,7 +2912,14 @@ def list_checkpoints() -> list[dict]:
         rel = rel_path.replace("\\", "/")
         if rel not in seen:
             seen.add(rel)
-            out.append({"path": rel, "config": cfg_path.replace("\\", "/") if cfg_path else ""})
+            item = {"path": rel, "config": cfg_path.replace("\\", "/") if cfg_path else ""}
+            if (ROOT / rel / 'config.json').is_file():
+                try:
+                    policy = read_policy(ROOT / rel)
+                    item.update(policy_type=policy['type'], can_finetune=(ROOT / rel / 'model.safetensors').is_file())
+                except ValueError:
+                    item.update(can_finetune=False)
+            out.append(item)
     try:
         if OUTPUTS_DIR.exists():
             for d in sorted(OUTPUTS_DIR.rglob("pretrained_model")):
@@ -2919,7 +3007,9 @@ def observer_supervisor():
     while not TELEMETRY.stop.wait(.5):
         try:
             with STATE.lock:
-                if STATE.running() or DEVICES_RELEASED:
+                TELEMETRY.configure(monitor_ports(load_config()))
+                owns_ports=STATE.running() and getattr(STATE.job,'kind',None) in HW_KINDS
+                if owns_ports or DEVICES_RELEASED:
                     TELEMETRY.stop_observers()
                 else:
                     TELEMETRY.observe_idle(monitor_ports(load_config()), bool(ENV.connected or ENV.dual_connected))
@@ -2991,8 +3081,8 @@ async def lifespan(app: FastAPI):
         _terminate(STATE.job.proc)
 
 
-APP_VERSION='3.4.1'
-APP_BUILD='20261114.2'
+APP_VERSION='3.5.4'
+APP_BUILD='20261114.20'
 app = FastAPI(title="机械臂一键操控与训练平台", version=APP_VERSION, lifespan=lifespan)
 
 class BuildHeaders:
@@ -3138,7 +3228,7 @@ def api_status():
                     "step_limit": p["step_limit"], "last_line": p["last_line"],
                     "silent_for": p["silent_for"],
                     "awaiting_input": p["awaiting_input"], "prompt": p["prompt"],
-                    "job_id": p["job_id"], "prompt_id": p["prompt_id"],
+                    "job_id": p["job_id"], "prompt_id": p["prompt_id"], "stopping":job.stopping,
                     } if job else None
             snapshot_at=time.time()
         return {"status_ts":snapshot_at,"platform": platform.system(), "is_windows": IS_WINDOWS,
@@ -3275,9 +3365,6 @@ def api_save_config(payload: Optional[dict] = Body(default=None)):
     with STATE.lock:
         old = load_config()
         merged = _deep_merge(old, e)
-        if 'sorting' in e:
-            from backend.sorting.service import validate_settings
-            validate_settings(e['sorting'])
         if 'monitor_layout' in e:
             try:resolve_monitor_geometry(merged.get('monitor_layout'))
             except ValueError as exc:raise ApiError(str(exc),400)
@@ -3809,13 +3896,14 @@ def api_monitor_layout():
 
 @app.get('/api/monitor/status')
 def api_monitor_status():
+    TELEMETRY.configure(monitor_ports(load_config()))
     return {**TELEMETRY.snapshot(), 'released':DEVICES_RELEASED,
             'cameras':CAMERAS.status(), 'depth':DEPTH.status()}
 
 
 @app.websocket('/ws/monitor')
 async def ws_monitor(ws: WebSocket):
-    await ws.accept(); queue = TELEMETRY.subscribe()
+    await ws.accept(); TELEMETRY.configure(monitor_ports(load_config())); queue = TELEMETRY.subscribe()
     try:
         await ws.send_json({**TELEMETRY.snapshot(),'released':DEVICES_RELEASED})
         last_health = 0
@@ -3825,7 +3913,7 @@ async def ws_monitor(ws: WebSocket):
             if packet is not None:await ws.send_json(packet)
             if time.monotonic()-last_health >= 2:
                 last_health=time.monotonic()
-                await ws.send_json(await asyncio.to_thread(lambda:{'type':'health','time':time.time(),'depth':DEPTH.status(),'cameras':CAMERAS.status(),'released':DEVICES_RELEASED}))
+                await ws.send_json(await asyncio.to_thread(lambda:{'type':'health','time':time.time(),'depth':DEPTH.status(),'cameras':CAMERAS.status(),'released':DEVICES_RELEASED,'bindings':TELEMETRY.snapshot()['bindings'],'binding_generation':TELEMETRY.snapshot()['binding_generation']}))
     except (WebSocketDisconnect, RuntimeError):
         pass
     finally:
@@ -4652,6 +4740,66 @@ def api_train_start(payload: Optional[dict] = Body(default=None)):
         raise ApiError(f"请先选择训练引擎，可选：{', '.join(TRAIN_BACKENDS)}", 400)
     params = e.get("params") if isinstance(e.get("params"), dict) else {}
     return start_train(backend, params)
+
+
+@app.post('/api/train/finetune/inspect')
+def api_train_finetune_inspect(payload: Optional[dict] = Body(default=None)):
+    params = _deep_merge(load_config()['train'], payload or {})
+    try:
+        source, policy = prepare_finetune(params, ROOT, LEROBOT_HOME)
+    except ValueError as exc:
+        raise ApiError(str(exc), 400) from exc
+    return {'ok': True, 'base_model': source, 'policy_type': params.get('policy_type'),
+            'input_features': (policy or {}).get('input_features', {}),
+            'output_features': (policy or {}).get('output_features', {}),
+            'note': '将加载已有权重，以所选数据集新建微调任务；优化器和步数重新开始，原模型保留。'}
+
+
+_MODEL_EVAL_JOBS: dict[str, Job] = {}
+
+
+@app.post('/api/model-eval/start')
+def api_model_eval_start(payload: Optional[dict] = Body(default=None)):
+    require_env()
+    with STATE.lock:
+        if STATE.running():
+            raise ApiError('已有任务运行中，请等待当前任务结束后再评估', 409)
+        values = _deep_merge(load_config().get('model_eval') or {}, payload or {})
+        try:
+            params = prepare_evaluation(values, ROOT, LEROBOT_HOME)
+        except (ValueError, TypeError, OSError) as exc:
+            raise ApiError(f'评估参数无效：{exc}', 400) from exc
+        evaluation_id = os.urandom(12).hex()
+        params['result_path'] = str(OUTPUTS_DIR / 'model_evaluations' / (evaluation_id + '.json'))
+        result = _spawn('model-eval', 'ACT 离线模型评估', _py() + ['-u', str(BACKEND_DIR / 'model_eval_worker.py'),
+                        json.dumps(params, ensure_ascii=False)],
+                        env_extra={'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1'})
+        _MODEL_EVAL_JOBS[evaluation_id] = STATE.job
+        while len(_MODEL_EVAL_JOBS) > 20: _MODEL_EVAL_JOBS.pop(next(iter(_MODEL_EVAL_JOBS)))
+        save_config({'model_eval': {**{k: params[k] for k in ('base_model', 'repo_id', 'dataset_dir', 'episodes', 'max_samples', 'batch_size', 'device', 'video_backend')},
+                                    'last_evaluation_id': evaluation_id}})
+        return {**result, 'evaluation_id': evaluation_id}
+
+
+@app.get('/api/model-eval/result')
+def api_model_eval_result(evaluation_id: str = ''):
+    ident = evaluation_id or str((load_config().get('model_eval') or {}).get('last_evaluation_id') or '')
+    if not ident:
+        return {'ok': True, 'finished': True, 'result': None, 'evaluation_id': ''}
+    if not re.fullmatch(r'[0-9a-f]{24}', ident):
+        raise ApiError('评估结果编号无效', 400)
+    with STATE.lock:
+        job = _MODEL_EVAL_JOBS.get(ident)
+        path = OUTPUTS_DIR / 'model_evaluations' / (ident + '.json')
+        report = job.result if job else None
+        if report is None and path.is_file():
+            try: report = json.loads(path.read_text('utf-8'))
+            except (OSError, ValueError) as exc: raise ApiError(f'无法读取评估报告：{exc}', 500) from exc
+        if job is None and report is None:
+            raise ApiError('该次评估未保存完整报告，请重新评估并检查日志', 404)
+        return {'ok': True, 'evaluation_id': ident, 'finished': job.finished.is_set() if job else True,
+                'exit_code': job.exit_code if job else 0, 'result': report,
+                'last_line': job.last_line if job else ''}
 
 
 @app.post("/api/train/resume")
@@ -6133,61 +6281,6 @@ async def ws_logs(ws: WebSocket):
         HUB.log(f"[ws] 推送异常：{_brief(exc)}", "warn")
     finally:
         HUB.unsubscribe(q)
-
-
-# RGB-D calibration belongs to cameras; skill execution belongs to evaluation.
-# Hooks delay all hardware/model imports until a deliberate request.
-from types import SimpleNamespace
-from backend.sorting.api import attach as attach_sorting
-from backend.sorting.geometry import SortingError
-
-
-def _sorting_connected():
-    if IS_WINDOWS:raise SortingError('自主操作只在 Ubuntu 真机运行')
-    if DEVICES_RELEASED:raise SortingError('设备已释放，请重新连接')
-    if not dual_enabled(load_config()):raise SortingError('该执行器需要双臂 14 维配置')
-    _guard('sorting-run')
-    _home_targets(load_config())  # Enforce B601-DM/damiao and distinct ports.
-
-
-def _sorting_measured():
-    if SORTING.control and SORTING.control.alive():
-        state=SORTING.control.call('state',timeout=2)
-        if state['fault']:raise SortingError(state['fault'])
-        return state['joints']
-    cfg=load_config();ports=monitor_ports(cfg);latest=TELEMETRY.snapshot()['arms'];values=[]
-    if not dual_enabled(cfg):raise SortingError('需要双臂实测反馈')
-    for side in ('left','right'):
-        arm=latest.get(side) or {}
-        if (time.time()-arm.get('timestamp',0)>.4 or
-            os.path.realpath(arm.get('port',''))!=os.path.realpath(ports.get(side,'')) or
-            arm.get('gripper') is None):
-            raise SortingError(side+' 从臂缺少新鲜的完整 7 关节实测反馈，请连接设备并等待监视更新')
-        values.extend(arm['joints']+[arm['gripper']])
-    return values
-
-
-def _sorting_prepare():
-    _sorting_connected();TELEMETRY.stop_observers()
-    daemon=globals().get('_ARM_PROC')
-    if daemon is not None and daemon.poll() is None:raise SortingError('串口仍由旧控制进程占用')
-    from backend.device_release import owners
-    if owners(list(monitor_ports(load_config()).values())):raise SortingError('从臂串口被其他进程占用，未开始控制')
-
-
-def _sorting_save(patch):
-    with STATE.lock:
-        if STATE.running() and getattr(STATE.job,'kind',None)=='sorting-run':raise SortingError('任务运行期间请先停止，再修改标定或技能')
-        return save_config(patch)
-
-
-SORTING=attach_sorting(app,SimpleNamespace(root=ROOT,load_config=load_config,save_config=_sorting_save,
-    python=lambda:_bin('python'),camera=camera_probe,depth=depth_lease,
-    version=lambda:APP_VERSION+'+'+APP_BUILD,lock=STATE.lock,running=STATE.running,
-    spawn=_spawn,local_url=lambda:f'http://127.0.0.1:{PORT}',log=HUB.log,
-    require_connected=_sorting_connected,measured=_sorting_measured,prepare_control=_sorting_prepare,
-    arms=lambda:[{'side':side,'port':port} for side,port in monitor_ports(load_config()).items()],
-    environment=lambda:dict(os.environ,**TELEMETRY.environment(monitor_ports(load_config())))))
 
 
 if __name__ == "__main__":

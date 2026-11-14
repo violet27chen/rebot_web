@@ -4,7 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>模型训练 · 机械臂控制台</title>
   <link rel="icon" type="image/svg+xml" href="/static/img/logo.svg">
-  <link rel="stylesheet" href="/static/css/style.css?v=3.4.1-20261114-2">
+  <link rel="stylesheet" href="/static/css/style.css?v=3.5.4-20261114-20-r2">
 </head>
 <body>
   <div id="shell"></div>
@@ -27,13 +27,20 @@
 
       <div id="params-lerobot">
         <div class="row">
+          <div class="field"><label for="l_training_mode">训练方式</label><select id="l_training_mode">
+            <option value="scratch">从头训练新模型</option>
+            <option value="finetune">在已有模型上微调</option>
+          </select></div>
+          <p class="hint field wide" id="trainingModeHint" aria-live="polite">从零初始化策略，训练一个新模型。</p>
+        </div>
+        <div class="row">
           <div class="field wide"><label>数据集 repo_id</label><select id="l_repo_id"></select></div>
           <div class="field narrow"><label>策略类型</label><select id="l_policy_type">
             <option value="act">ACT</option>
             <option value="diffusion">Diffusion</option>
             <option value="smolvla">SmolVLA 微调</option>
           </select></div>
-          <div class="field narrow"><label>steps</label><input id="l_steps" type="number" value="300000"></div>
+          <div class="field narrow"><label for="l_steps" id="trainingStepsLabel">训练步数</label><input id="l_steps" type="number" min="1" step="1" value="300000"></div>
         </div>
         <div class="row" style="margin-top:12px">
           <div class="field wide"><label>数据集目录（可选，优先于上面的 repo_id）</label>
@@ -51,8 +58,17 @@
           <div class="field"><label>batch_size（0 = 默认）</label><input id="l_batch_size" type="number" value="0"></div>
           <div class="field"><label>device</label><input id="l_device" value="cuda"></div>
           <div class="field"><label>video_backend</label><input id="l_video_backend" placeholder="留空使用默认"></div>
-          <div class="field wide" id="baseModelRow"><label>基础模型（仅 SmolVLA 用，ACT 请留空）</label>
-            <input id="l_base_model" placeholder="lerobot/smolvla_base"></div>
+        </div>
+        <div id="baseModelRow" hidden>
+          <div class="row" style="margin-top:12px">
+            <div class="field wide"><label for="l_checkpoint">已有模型路径 · 下拉选择自动填入</label><select id="l_checkpoint"><option value="">手动输入模型路径</option></select></div>
+            <div class="btn-row"><button class="btn subtle sm" type="button" id="btnRefreshModels">刷新模型列表</button></div>
+            <div class="field"><label for="l_learning_rate">ACT 学习率（0 = 沿用模型配置）</label><input id="l_learning_rate" type="number" min="0" step="any" value="0"></div>
+          </div>
+          <div class="field" style="margin-top:12px"><label for="l_base_model">已选模型路径（也可手动填写）</label>
+            <input id="l_base_model" placeholder="outputs/train/技能名/checkpoints/last/pretrained_model"></div>
+          <div class="btn-row" style="margin-top:10px"><button class="btn subtle sm" type="button" id="btnInspectFinetune">检查模型与数据集兼容性</button><span id="finetuneStatus" class="hint" aria-live="polite">选择模型后检查动作维度、相机名称和分辨率。</span></div>
+          <p class="hint">继续训练同一技能时，可选择追加了示教的数据集。推拢、盒子翻面、袋子翻面仍分别训练；请保持关节顺序和相机配置一致。微调会新建任务并保留原模型，填写本次追加训练的步数。使用新旧示教数据一起微调有助于保留原有动作。</p>
         </div>
         <div class="row" style="margin-top:12px">
           <div class="field wide"><label>输出目录</label><input id="l_output_dir"></div>
@@ -130,7 +146,7 @@
       <div class="btn-row">
         <button class="btn primary" id="btnTrain">开始训练</button>
         <button class="btn danger" id="btnStop">全局急停</button>
-        <button class="btn subtle" id="btnResume">恢复 LeRobot 训练</button>
+        <button class="btn subtle" id="btnResume" title="恢复原任务的优化器、步数和数据集；新增数据请用已有模型微调">断点续训原任务</button>
         <span class="muted" id="trainState"></span>
       </div>
     </div>
@@ -140,6 +156,7 @@
       <div class="card">
         <div class="card-h"><h2>Loss 曲线</h2><span class="sub" id="lossCount">0 个指标点</span></div>
         <div class="chart-wrap"><canvas id="lossChart"></canvas></div>
+        <p class="hint" id="lossAxes">X：训练步数（Step） · Y：损失值（Loss）</p>
         <div class="btn sm subtle" style="margin-top:10px"><button class="btn sm" id="btnClearLoss">清空曲线</button></div>
       </div>
       <div class="card">
@@ -160,10 +177,19 @@
       </div>
       <div class="log" id="logPanel"></div>
     </div>
+    <div class="card" id="modelEvalCard">
+      <div class="card-h"><h2>离线模型评估</h2><button class="btn primary" type="button" id="btnModelEval">选择模型并评估</button></div>
+      <p class="hint">使用已录制的测试数据验证 ACT 预测动作。读取数据集中的所有相机画面，无需连接机械臂。</p>
+      <p id="modelEvalState" role="status" aria-live="polite">正在读取评估结果…</p>
+      <dl class="kv" id="modelEvalMetrics" hidden></dl>
+      <div class="scroll" id="modelEvalJoints" hidden></div>
+      <p class="hint" id="modelEvalNote"></p>
+    </div>
   </div>
-  <script src="/static/js/common.js?v=3.4.1-20261114-2"></script>
-  <script src="/static/js/autosave.js?v=3.4.1-20261114-2"></script>
-  <script src="/static/js/train.js?v=3.4.1-20261114-2"></script>
-  <script src="/static/js/dataset-features.js?v=3.4.1-20261114-2"></script>
+  <script src="/static/js/common.js?v=3.5.4-20261114-20-r2"></script>
+  <script src="/static/js/autosave.js?v=3.5.4-20261114-20-r2"></script>
+  <script src="/static/js/train.js?v=3.5.4-20261114-20-r2"></script>
+  <script src="/static/js/dataset-features.js?v=3.5.4-20261114-20-r2"></script>
+  <script src="/static/js/model-eval.js?v=3.5.4-20261114-20-r2"></script>
 </body>
 </html>

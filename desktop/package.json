@@ -1,6 +1,6 @@
 {
   "name": "rebot-console",
-  "version": "3.4.1",
+  "version": "3.5.4",
   "description": "reBot 机器人桌面控制台；Windows 与 Linux 本机控制",
   "main": "src/main.cjs",
   "author": "reBot Project",

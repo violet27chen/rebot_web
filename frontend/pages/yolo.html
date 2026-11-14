@@ -4,7 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>视觉数据 · 机械臂控制台</title>
   <link rel="icon" href="/static/img/logo.svg">
-  <link rel="stylesheet" href="/static/css/style.css?v=3.4.1-20261114-2">
+  <link rel="stylesheet" href="/static/css/style.css?v=3.5.4-20261114-20-r2">
 </head>
 <body>
   <div id="shell"></div>
@@ -149,12 +149,11 @@ python -c "from transformers import AutoProcessor, AutoModelForZeroShotObjectDet
     </div>
 
     <div class="card">
-      <div class="card-h"><h2>5 · 验证 YOLO 效果并应用</h2><span class="sub">训练完成后选模型 + 图片/摄像头，检验检测结果并可一键设为分拣检测模型</span></div>
+      <div class="card-h"><h2>5 · 验证 YOLO 效果并应用</h2><span class="sub">训练完成后选模型 + 图片/摄像头，检验检测结果</span></div>
       <div class="row">
         <div class="field wide"><label>模型 (.pt)</label><select id="valModel"></select></div>
         <div class="btn-row">
           <button class="btn subtle" type="button" id="btnReloadModels">刷新模型</button>
-          <button class="btn subtle" type="button" id="btnApplySortingModel">设为包裹分拣检测模型</button>
         </div>
       </div>
       <div class="row" style="margin-top:12px">
@@ -178,8 +177,8 @@ python -c "from transformers import AutoProcessor, AutoModelForZeroShotObjectDet
       <div class="log" id="logPanel"></div>
     </div>
   </div>
-  <script src="/static/js/common.js?v=3.5.0-20261114-6"></script>
-  <script src="/static/js/autosave.js?v=3.4.1-20261114-2"></script>
-  <script src="/static/js/yolo.js?v=3.5.0-20261114-7"></script>
+  <script src="/static/js/common.js?v=3.5.4-20261114-20-r2"></script>
+  <script src="/static/js/autosave.js?v=3.5.4-20261114-20-r2"></script>
+  <script src="/static/js/yolo.js?v=3.5.4-20261114-20-r2"></script>
 </body>
 </html>

@@ -113,7 +113,7 @@
     try {
       var data = await A.api.get('/api/cameras/devices'); devices = data.devices || [];
       A.el('deviceReport').textContent = devices.map(function (d) { return d.path + ' · ' + d.name + ' · ' + d.bus; }).join('\n') || '未发现视频采集设备';
-      if (data.errors.length) A.el('deviceReport').textContent += '\n' + data.errors.map(function (e) { return e.path + '：' + e.error; }).join('\n');
+      if ((data.errors||[]).length) A.el('deviceReport').textContent += '\n' + data.errors.map(function (e) { return e.path + '：' + e.error; }).join('\n');
       if (announce) A.toast('发现 ' + devices.length + ' 个视频采集设备', 'ok');
     } finally { b.disabled = false; }
   }
