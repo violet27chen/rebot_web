@@ -47,15 +47,19 @@
       </div>
       <hr>
       <div class="card-h">
-        <h2 style="font-size:14px">快递单号实时识别（采集同步扫码）</h2>
-        <span class="sub" id="dsWaybillScanState">采集过程中自动通过摄像头识别面单条码 / 二维码</span>
+        <h2 style="font-size:14px">快递单号自动识别（采集实时确认 · 不保存单号）</h2>
+        <span class="sub" id="dsWaybillScanState">采集过程中自动通过摄像头识别面单，仅用于确认已扫到，不写入单号文件</span>
       </div>
       <div id="dsWaybillBanner" style="border:2px solid var(--border,#cbd5e1);border-radius:10px;padding:12px 16px;background:var(--bg-subtle,rgba(148,163,184,0.08));display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
         <div>
           <div style="font-size:12px;color:var(--muted,#64748b);margin-bottom:2px" id="dsWaybillBannerLabel">当前识别状态</div>
-          <div style="font-size:19px;font-weight:700;word-break:break-all" id="dsWaybillBannerCode">等待识别快递单号…</div>
+          <div style="font-size:19px;font-weight:700" id="dsWaybillBannerCode">正在自动扫描快递单号…</div>
+          <div id="dsWaybillBannerMeta" class="muted" style="font-size:12.5px;margin-top:3px">采集时将快递面单朝向摄像头即可自动识别（采集不保存单号）</div>
         </div>
-        <div id="dsWaybillBannerMeta" class="muted" style="font-size:12.5px;text-align:right">采集时将快递面单朝向摄像头即可自动识别</div>
+        <div style="text-align:right;padding:6px 14px;border-radius:8px;background:var(--surface,#fff);border:1px solid var(--border,#e2e8f0)">
+          <div style="font-size:11.5px;color:var(--muted,#64748b)">本轮已扫数量</div>
+          <div style="font-size:24px;font-weight:800;font-variant-numeric:tabular-nums;color:var(--primary,#2563eb);line-height:1.2" id="dsWaybillCountNum">0 个</div>
+        </div>
       </div>
       <div class="row" style="margin-top:10px;align-items:flex-end;gap:10px;flex-wrap:wrap">
         <div class="field" style="min-width:200px">
@@ -65,31 +69,15 @@
           </select>
         </div>
         <div class="btn-row">
-          <button class="btn primary" type="button" id="btnDsScanWaybill">立即扫描单号</button>
-          <button class="btn subtle" type="button" id="btnDsClearWaybill">清空记录</button>
+          <button class="btn subtle" type="button" id="btnDsScanWaybill">立即扫一次</button>
+          <button class="btn subtle" type="button" id="btnDsClearWaybill">重置本轮计数</button>
         </div>
         <label class="check" style="margin-bottom:6px">
           <input type="checkbox" id="chkDsAutoScanWaybill" checked> 采集数据时自动连续扫码
         </label>
         <label class="check" style="margin-bottom:6px">
-          <input type="checkbox" id="chkDsIdleScanWaybill"> 空闲时也保持实时扫码
+          <input type="checkbox" id="chkDsIdleScanWaybill" checked> 待机时也自动连续扫码
         </label>
-      </div>
-      <div class="scroll" style="margin-top:10px;max-height:180px">
-        <table class="table" id="dsWaybillTable">
-          <thead>
-            <tr>
-              <th style="width:52px">#</th>
-              <th>已识别到快递单号</th>
-              <th style="width:110px">条码类型</th>
-              <th style="width:130px">识别相机</th>
-              <th style="width:100px">识别时间</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr><td colspan="5" class="muted">暂无已识别单号，开始采集或点击「立即扫描单号」即可识别</td></tr>
-          </tbody>
-        </table>
       </div>
     </div>
 
@@ -164,9 +152,9 @@
     <iframe id="camDockFrame" src="about:blank" title="摄像头画面"></iframe>
   </div>
 
-  <script src="/static/js/common.js?v=3.5.4-20261114-20-r3"></script>
-  <script src="/static/js/autosave.js?v=3.5.4-20261114-20-r3"></script>
-  <script src="/static/js/dataset.js?v=3.5.4-20261114-20-r3"></script>
-  <script src="/static/js/collection-plan.js?v=3.5.4-20261114-20-r3"></script>
+  <script src="/static/js/common.js?v=3.5.4-20261114-23"></script>
+  <script src="/static/js/autosave.js?v=3.5.4-20261114-23"></script>
+  <script src="/static/js/dataset.js?v=3.5.4-20261114-23"></script>
+  <script src="/static/js/collection-plan.js?v=3.5.4-20261114-23"></script>
 </body>
 </html>

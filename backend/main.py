@@ -231,7 +231,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
              "repo_id": "seeed/eval_test123",
              "single_task": "Put lego brick into the transparent box",
              "num_episodes": 1, "episode_time_s": 30, "reset_time_s": 10,
-             "continuous_sort": False, "idle_stop_s": 8, "max_sort_time_s": 600,
+             "continuous_sort": True, "idle_stop_s": 8, "max_sort_time_s": 600,
              "auto_home": True},
     "viz": {"repo_id": "seeed_rebot_b601_dm/test", "episode_index": 0,
             "display_compressed_images": False},
@@ -259,6 +259,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "model_path": "outputs/train/act_rebot_test/checkpoints/last/pretrained_model"},
     "teleop": {"display_data": True},
     "camera_backend": "opencv",
+    "ui_preferences": {},
 }
 
 # 文档命令中心按运行平台给出「当前系统里真的能执行」的命令：
@@ -6308,6 +6309,80 @@ def api_arm_hold():
 _WAYBILL_LOCK = threading.Lock()
 _WAYBILL_HISTORY: list[dict] = []
 _WAYBILL_LATEST: Optional[dict] = None
+_WAYBILL_LOADED = False
+WAYBILL_DIR = OUTPUTS_DIR / "waybills"
+WAYBILL_JSON = WAYBILL_DIR / "recognized_waybills.json"
+WAYBILL_CSV = WAYBILL_DIR / "recognized_waybills.csv"
+WAYBILL_TXT = WAYBILL_DIR / "recognized_waybills.txt"
+
+
+def _format_waybill_csv(items: list[dict]) -> str:
+    import csv
+    import io
+
+    buf = io.StringIO()
+    buf.write("\ufeff")  # UTF-8 BOM，方便 Excel 直接双击打开不乱码
+    writer = csv.writer(buf)
+    writer.writerow(["序号", "快递单号", "条码类型", "识别相机", "识别时间"])
+    for idx, item in enumerate(items, 1):
+        code_txt = str(item.get("text") or "")
+        # 纯数字长单号加 \t 前缀避免 Excel 自动转科学计数法
+        excel_safe = f"\t{code_txt}" if code_txt.isdigit() and len(code_txt) >= 10 else code_txt
+        writer.writerow([
+            idx,
+            excel_safe,
+            str(item.get("type") or "Barcode"),
+            str(item.get("camera") or "-"),
+            str(item.get("datetime") or item.get("time") or "-"),
+        ])
+    return buf.getvalue()
+
+
+def _format_waybill_txt(items: list[dict]) -> str:
+    lines = ["# 序号\t快递单号\t条码类型\t识别相机\t识别时间"]
+    for idx, item in enumerate(items, 1):
+        lines.append(
+            f"{idx}\t{item.get('text') or ''}\t{item.get('type') or 'Barcode'}\t"
+            f"{item.get('camera') or '-'}\t{item.get('datetime') or item.get('time') or '-'}"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _ensure_waybill_loaded() -> None:
+    global _WAYBILL_LOADED, _WAYBILL_LATEST
+    if _WAYBILL_LOADED:
+        return
+    _WAYBILL_LOADED = True
+    try:
+        if WAYBILL_JSON.is_file():
+            data = json.loads(WAYBILL_JSON.read_text("utf-8"))
+            items = data.get("history") if isinstance(data, dict) else data
+            if isinstance(items, list):
+                _WAYBILL_HISTORY.clear()
+                for x in items:
+                    if isinstance(x, dict) and str(x.get("text") or "").strip():
+                        _WAYBILL_HISTORY.append(x)
+                _WAYBILL_LATEST = _WAYBILL_HISTORY[0] if _WAYBILL_HISTORY else None
+    except Exception:
+        pass
+
+
+def _persist_waybill_files() -> None:
+    """将已识别单号持久化写入 JSON / CSV / TXT 文件（必须在持有 _WAYBILL_LOCK 时调用）。"""
+    try:
+        WAYBILL_DIR.mkdir(parents=True, exist_ok=True)
+        WAYBILL_JSON.write_text(
+            json.dumps(
+                {"updated_at": time.strftime("%Y-%m-%d %H:%M:%S"), "count": len(_WAYBILL_HISTORY), "history": _WAYBILL_HISTORY},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            "utf-8",
+        )
+        WAYBILL_CSV.write_text(_format_waybill_csv(_WAYBILL_HISTORY), "utf-8")
+        WAYBILL_TXT.write_text(_format_waybill_txt(_WAYBILL_HISTORY), "utf-8")
+    except Exception as exc:  # noqa: BLE001
+        HUB.log(f"[快递单号识别] 写入单号文件失败：{_brief(exc)}", "warn")
 
 
 def _decode_waybill_frame(image: Any) -> dict:
@@ -6372,22 +6447,48 @@ def _decode_waybill_frame(image: Any) -> dict:
 @app.get("/api/waybill/history")
 def api_waybill_history():
     with _WAYBILL_LOCK:
+        _ensure_waybill_loaded()
         return {
             "ok": True,
             "latest": _WAYBILL_LATEST,
-            "history": list(_WAYBILL_HISTORY),
             "count": len(_WAYBILL_HISTORY),
+            "file_path": str(WAYBILL_CSV.relative_to(ROOT)),
         }
+
+
+@app.get("/api/waybill/download")
+def api_waybill_download(format: str = "csv"):
+    with _WAYBILL_LOCK:
+        _ensure_waybill_loaded()
+        items = list(_WAYBILL_HISTORY)
+        _persist_waybill_files()
+    fmt = (format or "csv").strip().lower()
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    if fmt == "txt":
+        body = _format_waybill_txt(items)
+        return Response(
+            content=body.encode("utf-8"),
+            media_type="text/plain; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="waybills_{stamp}.txt"'},
+        )
+    body = _format_waybill_csv(items)
+    return Response(
+        content=body.encode("utf-8"),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="waybills_{stamp}.csv"'},
+    )
 
 
 @app.post("/api/waybill/clear")
 def api_waybill_clear():
     global _WAYBILL_LATEST
     with _WAYBILL_LOCK:
+        _ensure_waybill_loaded()
         _WAYBILL_HISTORY.clear()
         _WAYBILL_LATEST = None
-    HUB.log("[快递单号识别] 已清空单号识别记录", "info")
-    return {"ok": True, "latest": None, "history": [], "count": 0}
+        _persist_waybill_files()
+    HUB.log("[快递单号识别] 已清空已保存的快递单号记录", "info")
+    return {"ok": True, "latest": None, "count": 0}
 
 
 @app.post("/api/waybill/scan")
@@ -6395,16 +6496,22 @@ def api_waybill_scan(payload: Optional[dict] = Body(default=None)):
     global _WAYBILL_LATEST
     req = payload or {}
     target_cam = str(req.get("camera") or "all").strip()
+    save_to_file = bool(req.get("save", True))
     cfg = load_config()
     cams = cfg.get("cameras") or []
+    with _WAYBILL_LOCK:
+        _ensure_waybill_loaded()
+        cur_count = len(_WAYBILL_HISTORY)
+        cur_latest = _WAYBILL_LATEST
     if not cams:
         return {
             "ok": False,
             "found": False,
+            "saved": False,
             "error": "尚未配置任何摄像头，请先在「摄像头」页面添加相机",
             "codes": [],
-            "latest": _WAYBILL_LATEST,
-            "history": list(_WAYBILL_HISTORY),
+            "latest": cur_latest if save_to_file else None,
+            "count": cur_count,
             "scanned_cameras": [],
         }
 
@@ -6424,6 +6531,7 @@ def api_waybill_scan(payload: Optional[dict] = Body(default=None)):
     detected_now: list[dict] = []
     errors: list[str] = []
     now_str = time.strftime("%H:%M:%S")
+    now_dt = time.strftime("%Y-%m-%d %H:%M:%S")
     now_ts = round(time.time(), 3)
 
     for c in selected_cams:
@@ -6432,8 +6540,8 @@ def api_waybill_scan(payload: Optional[dict] = Body(default=None)):
         cap = None
         try:
             cap = camera_probe(src)
-            ok, frame = cap.read()
-            if not ok or frame is None:
+            ok_read, frame = cap.read()
+            if not ok_read or frame is None:
                 errors.append(f"{cam_name}({src}): 未读到画面帧")
                 scanned_cameras.append({
                     "name": cam_name,
@@ -6459,6 +6567,7 @@ def api_waybill_scan(payload: Optional[dict] = Body(default=None)):
                     "camera": cam_name,
                     "source": str(src),
                     "time": now_str,
+                    "datetime": now_dt,
                     "ts": now_ts,
                 }
                 detected_now.append(entry)
@@ -6479,45 +6588,54 @@ def api_waybill_scan(payload: Optional[dict] = Body(default=None)):
                     pass
 
     new_codes: list[dict] = []
-    with _WAYBILL_LOCK:
-        for entry in detected_now:
-            _WAYBILL_LATEST = entry
-            existing_idx = next(
-                (i for i, h in enumerate(_WAYBILL_HISTORY) if h.get("text") == entry["text"]),
-                None,
+    if save_to_file:
+        with _WAYBILL_LOCK:
+            _ensure_waybill_loaded()
+            for entry in detected_now:
+                _WAYBILL_LATEST = entry
+                existing_idx = next(
+                    (i for i, h in enumerate(_WAYBILL_HISTORY) if h.get("text") == entry["text"]),
+                    None,
+                )
+                if existing_idx is None:
+                    _WAYBILL_HISTORY.insert(0, entry)
+                    if len(_WAYBILL_HISTORY) > 5000:
+                        del _WAYBILL_HISTORY[5000:]
+                    new_codes.append(entry)
+                else:
+                    prev = _WAYBILL_HISTORY[existing_idx]
+                    prev["time"] = entry["time"]
+                    prev["datetime"] = entry["datetime"]
+                    prev["ts"] = entry["ts"]
+                    prev["camera"] = entry["camera"]
+                    prev["type"] = entry["type"]
+            if detected_now:
+                _persist_waybill_files()
+            latest_snap = _WAYBILL_LATEST
+            total_count = len(_WAYBILL_HISTORY)
+        for nc in new_codes:
+            HUB.log(
+                f"[快递单号识别] 已识别并保存快递单号（累计第 {total_count} 个 · 格式：{nc['type']} · 相机：{nc['camera']}）",
+                "ok",
             )
-            if existing_idx is None:
-                _WAYBILL_HISTORY.insert(0, entry)
-                if len(_WAYBILL_HISTORY) > 100:
-                    del _WAYBILL_HISTORY[100:]
-                new_codes.append(entry)
-            else:
-                prev = _WAYBILL_HISTORY[existing_idx]
-                prev["time"] = entry["time"]
-                prev["ts"] = entry["ts"]
-                prev["camera"] = entry["camera"]
-                prev["type"] = entry["type"]
-                if existing_idx > 0:
-                    _WAYBILL_HISTORY.pop(existing_idx)
-                    _WAYBILL_HISTORY.insert(0, prev)
-        latest_snap = _WAYBILL_LATEST
-        history_snap = list(_WAYBILL_HISTORY)
-
-    for nc in new_codes:
-        HUB.log(
-            f"[快递单号识别] 已识别到快递单号：{nc['text']}（格式：{nc['type']} · 相机：{nc['camera']}）",
-            "ok",
-        )
+    else:
+        # 采集模式：仅返回当前识别状态，不保存到快递单号文件
+        latest_snap = detected_now[0] if detected_now else None
+        new_codes = list(detected_now)
+        with _WAYBILL_LOCK:
+            _ensure_waybill_loaded()
+            total_count = len(_WAYBILL_HISTORY)
 
     any_cam_ok = any(sc.get("ok") for sc in scanned_cameras)
     return {
         "ok": any_cam_ok,
         "found": len(detected_now) > 0,
+        "saved": save_to_file and len(detected_now) > 0,
         "codes": detected_now,
         "new_codes": new_codes,
         "latest": latest_snap,
-        "history": history_snap,
-        "count": len(history_snap),
+        "count": total_count,
+        "file_path": str(WAYBILL_CSV.relative_to(ROOT)),
         "scanned_cameras": scanned_cameras,
         "error": ("；".join(errors) if not any_cam_ok and errors else ""),
     }

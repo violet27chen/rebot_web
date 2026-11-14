@@ -656,6 +656,8 @@
     apply:applyTraining,
     validate:function(){A.qa('#params-'+selected+' input[type=number]').forEach(function(n){if(!n.checkValidity()||n.value==='')throw new Error('请填写有效的训练数值；默认批大小可填 0');});}
   });
+  if(trainAutosave&&trainAutosave.accept)trainAutosave.accept();
+  try{await A.autosave.preferences(['logAuto'],'train');}catch(e){}
   A.autosave.onConfig(function(){A.commandPreview('train','#trainCommandPreview');});
   A.el('hfMode').closest('.card').id='hfSettings';
   A.autosave.bind({id:'hf-source',section:'hf',root:'#hfSettings',read:function(){return {hf:{endpoint:hfEndpointValue(),auto:A.el('hfMode').value==='auto'}};},apply:loadHf});

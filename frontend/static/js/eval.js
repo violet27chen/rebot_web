@@ -36,9 +36,9 @@
       "_" + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());
   }
 
-  /* ---------------- 快递单号实时识别（条码 / 二维码） ---------------- */
+  /* ---------------- 快递单号自动识别与持久化保存（页面仅显示数量，单号写入文件供下载） ---------------- */
   var waybillBusy = false;
-  var lastAnnouncedCode = "";
+  var lastAnnouncedCount = -1;
 
   function populateWaybillCameras(cameras) {
     var sel = A.el("waybillCamSelect");
@@ -52,8 +52,11 @@
         A.esc(name + (src ? " (" + src + ")" : "")) + "</option>");
     });
     sel.innerHTML = opts.join("");
-    sel.value = cur;
-    if (!sel.value) sel.value = "all";
+    if (Array.from(sel.options).some(function (o) { return o.value === cur; })) {
+      sel.value = cur;
+    } else {
+      sel.value = "all";
+    }
   }
 
   function renderWaybillState(data, isManual) {
@@ -62,31 +65,37 @@
     var labelEl = A.el("waybillBannerLabel");
     var codeEl = A.el("waybillBannerCode");
     var metaEl = A.el("waybillBannerMeta");
+    var countEl = A.el("waybillCountNum");
     var stateEl = A.el("waybillScanState");
-    var tbody = A.q("#waybillTable tbody");
 
+    var totalCount = Number(data.count || 0);
     var latest = data.latest;
-    var history = data.history || [];
+    var foundNow = Boolean(data.found);
 
-    if (latest && latest.text) {
+    if (countEl) {
+      countEl.textContent = totalCount + " 个";
+    }
+
+    if (foundNow || (latest && totalCount > 0)) {
       if (banner) {
         banner.style.borderColor = "#16a34a";
         banner.style.background = "rgba(22,163,74,0.10)";
       }
       if (labelEl) {
-        labelEl.textContent = "✅ 已识别到快递单号";
+        labelEl.textContent = foundNow ? "✅ 画面当前已识别到快递单号" : "✅ 最近已识别并保存快递单号";
         labelEl.style.color = "#15803d";
         labelEl.style.fontWeight = "600";
       }
       if (codeEl) {
-        codeEl.textContent = "已识别到快递单号：" + latest.text;
+        codeEl.textContent = "已识别到快递单号（累计已扫 " + totalCount + " 个）";
         codeEl.style.color = "#14532d";
       }
-      if (metaEl) {
+      if (metaEl && latest) {
         metaEl.innerHTML =
-          '<span class="badge ok">' + A.esc(latest.type || "Barcode") + "</span> " +
-          '<span>相机：' + A.esc(latest.camera || "-") + "</span> · " +
-          '<span>时间：' + A.esc(latest.time || "-") + "</span>";
+          '<span class="badge ok">' + A.esc(latest.type || "Barcode") + "</span> · " +
+          "<span>识别相机：" + A.esc(latest.camera || "-") + "</span> · " +
+          "<span>最近识别时间：" + A.esc(latest.time || "-") + "</span> · " +
+          "<span>具体单号已自动保存，可点击下方按钮下载文件查看</span>";
       }
     } else {
       if (banner) {
@@ -99,11 +108,11 @@
         labelEl.style.fontWeight = "400";
       }
       if (codeEl) {
-        codeEl.textContent = "等待识别快递单号…";
+        codeEl.textContent = "正在自动扫描快递单号…（已扫 0 个）";
         codeEl.style.color = "";
       }
       if (metaEl) {
-        metaEl.textContent = "将快递面单朝向任意已配置摄像头即可识别";
+        metaEl.textContent = "将快递面单朝向任意已配置摄像头即可自动识别并保存到单号文件";
       }
     }
 
@@ -111,39 +120,20 @@
       var camSummary = data.scanned_cameras.map(function (sc) {
         return sc.name + (sc.ok ? ("(清晰度 " + sc.sharpness + ")") : "(未就绪)");
       }).join(" / ");
-      stateEl.textContent = "最近扫描：" + camSummary + " · 累计识别 " + history.length + " 单";
-    }
-
-    if (tbody) {
-      if (!history.length) {
-        tbody.innerHTML = '<tr><td colspan="5" class="muted">暂无已识别单号，点击「立即扫描单号」或启动评估自动识别</td></tr>';
-      } else {
-        tbody.innerHTML = history.map(function (item, idx) {
-          return "<tr>" +
-            "<td>" + (idx + 1) + "</td>" +
-            '<td><strong style="color:#15803d;font-size:14.5px">已识别到快递单号：<code>' + A.esc(item.text) + "</code></strong></td>" +
-            '<td><span class="badge ok">' + A.esc(item.type || "Barcode") + "</span></td>" +
-            "<td>" + A.esc(item.camera || "-") + "</td>" +
-            '<td class="muted">' + A.esc(item.time || "-") + "</td>" +
-          "</tr>";
-        }).join("");
-      }
+      stateEl.textContent = "自动扫码中：" + camSummary + " · 已自动保存 " + totalCount + " 个单号";
     }
 
     var newCodes = data.new_codes || [];
-    if (newCodes.length) {
-      var firstNew = newCodes[0];
-      if (firstNew.text && firstNew.text !== lastAnnouncedCode) {
-        lastAnnouncedCode = firstNew.text;
-        A.toast("已识别到快递单号：" + firstNew.text + "（" + (firstNew.camera || "相机") + "）", "ok");
-      }
+    if (newCodes.length && totalCount !== lastAnnouncedCount) {
+      lastAnnouncedCount = totalCount;
+      A.toast("已识别并保存新的快递单号（累计已扫 " + totalCount + " 个）", "ok");
     } else if (isManual) {
-      if (data.found && data.codes && data.codes.length) {
-        A.toast("已识别到快递单号：" + data.codes[0].text, "ok");
+      if (foundNow) {
+        A.toast("已识别到快递单号（累计已扫 " + totalCount + " 个）", "ok");
       } else if (data.error) {
         A.toast("扫码未成功：" + data.error, "warn");
       } else {
-        A.toast("当前画面未检测到面单条码/二维码，请调整包裹位置或清晰度", "info");
+        A.toast("当前画面未检测到面单条码/二维码", "info");
       }
     }
   }
@@ -159,7 +149,7 @@
     try {
       var camSel = A.el("waybillCamSelect");
       var cam = (camSel && camSel.value) || "all";
-      var r = await A.api.post("/api/waybill/scan", { camera: cam });
+      var r = await A.api.post("/api/waybill/scan", { camera: cam, save: true });
       renderWaybillState(r, isManual);
     } catch (e) {
       if (isManual) A.toast("扫描失败：" + e.message, "err");
@@ -167,18 +157,34 @@
       waybillBusy = false;
       if (isManual && btn) {
         btn.disabled = false;
-        btn.textContent = "立即扫描单号";
+        btn.textContent = "立即扫一次";
       }
     }
+  }
+
+  function downloadWaybillFile(fmt) {
+    var a = document.createElement("a");
+    a.href = "/api/waybill/download?format=" + encodeURIComponent(fmt || "csv");
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    A.ok("正在下载已扫快递单号文件（." + (fmt || "csv") + "）", "#evalAlert");
   }
 
   async function loadWaybillHistory() {
     try {
       var r = await A.api.get("/api/waybill/history");
+      lastAnnouncedCount = Number(r.count || 0);
       renderWaybillState(r, false);
     } catch (e) { /* ignore */ }
   }
 
+  if (A.el("btnDownloadWaybillCsv")) {
+    A.click("btnDownloadWaybillCsv", function () { downloadWaybillFile("csv"); });
+  }
+  if (A.el("btnDownloadWaybillTxt")) {
+    A.click("btnDownloadWaybillTxt", function () { downloadWaybillFile("txt"); });
+  }
   if (A.el("btnScanWaybill")) {
     A.click("btnScanWaybill", function () { scanWaybillOnce(true); });
   }
@@ -186,17 +192,17 @@
     A.click("btnClearWaybill", function () {
       A.action(async function () {
         var r = await A.api.post("/api/waybill/clear", {});
-        lastAnnouncedCode = "";
+        lastAnnouncedCount = 0;
         renderWaybillState(r, false);
-        A.ok("已清空快递单号识别记录", "#evalAlert");
+        A.ok("已清空保存的快递单号记录", "#evalAlert");
       }, "#evalAlert");
     });
   }
 
   var waybillTimer = setInterval(function () {
     if (document.hidden) return;
-    var autoEval = A.el("chkAutoScanWaybill") && A.el("chkAutoScanWaybill").checked;
-    var autoIdle = A.el("chkIdleScanWaybill") && A.el("chkIdleScanWaybill").checked;
+    var autoEval = A.el("chkAutoScanWaybill") ? A.el("chkAutoScanWaybill").checked : true;
+    var autoIdle = A.el("chkIdleScanWaybill") ? A.el("chkIdleScanWaybill").checked : true;
     var st = A.status();
     var isEvalRunning = Boolean(st && st.running && st.job && (st.job.kind === "eval" || st.job.kind === "record"));
     if ((isEvalRunning && autoEval) || autoIdle) {
@@ -298,7 +304,17 @@
 
   await loadConfig();
   await loadWaybillHistory();
-  A.autosave.form('evalForm','eval');
+  var evalFormBinding = A.autosave.form('evalForm', 'eval', {
+    apply: function (cfg) {
+      A.fillForm(A.el('evalForm'), (cfg && cfg.eval) || cfg || {});
+      syncEvalModeUI();
+    }
+  });
+  if (evalFormBinding && evalFormBinding.accept) evalFormBinding.accept();
+  try {
+    await A.autosave.preferences(['waybillCamSelect', 'chkAutoScanWaybill', 'chkIdleScanWaybill', 'logAuto'], 'eval');
+  } catch (e) { /* ignore */ }
   A.autosave.onConfig(function(){A.commandPreview('eval','#workflowCommand');});
   A.commandPreview('eval','#workflowCommand');
+  scanWaybillOnce(false);
 })();

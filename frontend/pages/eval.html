@@ -13,15 +13,19 @@
 
     <div class="card">
       <div class="card-h">
-        <h2>快递单号实时识别</h2>
-        <span class="sub" id="waybillScanState">纯 RGB 摄像头条码 / 二维码解码 · 无需深度相机与 YOLO</span>
+        <h2>快递单号自动识别与导出</h2>
+        <span class="sub" id="waybillScanState">自动通过摄像头识别面单条码 / 二维码并自动保存到文件</span>
       </div>
-      <div id="waybillBanner" style="border:2px solid var(--border,#cbd5e1);border-radius:10px;padding:14px 18px;background:var(--bg-subtle,rgba(148,163,184,0.08));display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+      <div id="waybillBanner" style="border:2px solid var(--border,#cbd5e1);border-radius:10px;padding:14px 18px;background:var(--bg-subtle,rgba(148,163,184,0.08));display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap">
         <div>
           <div style="font-size:12.5px;color:var(--muted,#64748b);margin-bottom:4px" id="waybillBannerLabel">当前识别状态</div>
-          <div style="font-size:22px;font-weight:700;letter-spacing:0.3px;word-break:break-all" id="waybillBannerCode">等待识别快递单号…</div>
+          <div style="font-size:21px;font-weight:700;letter-spacing:0.3px" id="waybillBannerCode">正在自动扫描快递单号…</div>
+          <div id="waybillBannerMeta" class="muted" style="font-size:12.5px;margin-top:4px">将快递面单朝向任意已配置摄像头即可自动识别并保存</div>
         </div>
-        <div id="waybillBannerMeta" class="muted" style="font-size:13px;text-align:right">将快递面单朝向任意已配置摄像头即可识别</div>
+        <div style="text-align:right;padding:8px 16px;border-radius:8px;background:var(--surface,#fff);border:1px solid var(--border,#e2e8f0)">
+          <div style="font-size:12px;color:var(--muted,#64748b)">已扫快递单号数量</div>
+          <div style="font-size:28px;font-weight:800;font-variant-numeric:tabular-nums;color:var(--primary,#2563eb);line-height:1.2" id="waybillCountNum">0 个</div>
+        </div>
       </div>
       <div class="row" style="margin-top:12px;align-items:flex-end;gap:12px;flex-wrap:wrap">
         <div class="field" style="min-width:220px">
@@ -31,31 +35,17 @@
           </select>
         </div>
         <div class="btn-row">
-          <button class="btn primary" type="button" id="btnScanWaybill">立即扫描单号</button>
-          <button class="btn subtle" type="button" id="btnClearWaybill">清空识别记录</button>
+          <button class="btn primary" type="button" id="btnDownloadWaybillCsv">下载已扫单号 (.csv)</button>
+          <button class="btn subtle" type="button" id="btnDownloadWaybillTxt">下载已扫单号 (.txt)</button>
+          <button class="btn subtle" type="button" id="btnScanWaybill">立即扫一次</button>
+          <button class="btn subtle" type="button" id="btnClearWaybill">清空已存单号</button>
         </div>
         <label class="check" style="margin-bottom:6px">
-          <input type="checkbox" id="chkAutoScanWaybill" checked> 分拣/评估运行时自动连续扫码
+          <input type="checkbox" id="chkAutoScanWaybill" checked> 分拣/评估时自动连续扫码
         </label>
         <label class="check" style="margin-bottom:6px">
-          <input type="checkbox" id="chkIdleScanWaybill"> 空闲时也保持实时扫码
+          <input type="checkbox" id="chkIdleScanWaybill" checked> 待机时也自动连续扫码
         </label>
-      </div>
-      <div class="scroll" style="margin-top:12px;max-height:220px">
-        <table class="table" id="waybillTable">
-          <thead>
-            <tr>
-              <th style="width:60px">#</th>
-              <th>已识别到快递单号</th>
-              <th style="width:120px">条码类型</th>
-              <th style="width:140px">识别相机</th>
-              <th style="width:110px">识别时间</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr><td colspan="5" class="muted">暂无已识别单号，点击「立即扫描单号」或启动评估自动识别</td></tr>
-          </tbody>
-        </table>
       </div>
     </div>
 
@@ -113,8 +103,8 @@
       <div class="log" id="logPanel"></div>
     </div>
   </div>
-  <script src="/static/js/common.js?v=3.5.4-20261114-22"></script>
-  <script src="/static/js/autosave.js?v=3.5.4-20261114-22"></script>
-  <script src="/static/js/eval.js?v=3.5.4-20261114-22"></script>
+  <script src="/static/js/common.js?v=3.5.4-20261114-23"></script>
+  <script src="/static/js/autosave.js?v=3.5.4-20261114-23"></script>
+  <script src="/static/js/eval.js?v=3.5.4-20261114-23"></script>
 </body>
 </html>

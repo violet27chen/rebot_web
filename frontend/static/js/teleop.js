@@ -103,6 +103,8 @@
   });
 
   await loadConfig();
-  A.autosave.form('asyncForm','async_inference');
+  var asyncBind = A.autosave.form('asyncForm','async_inference');
+  if (asyncBind && asyncBind.accept) asyncBind.accept();
+  try { await A.autosave.preferences(['logAuto'], 'teleop'); } catch (e) {}
   A.autosave.onConfig(function(){A.commandPreview('teleoperate','#cmdPreview');});
 })();

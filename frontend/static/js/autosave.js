@@ -3,7 +3,7 @@
   'use strict';
   var A = window.APP, external = new Map(), bindings = [], writeQueue = Promise.resolve(), listeners = [];
   var revision = 0, pullTimer, pulling = false, pullAgain = false, retryTimer, directWrites=0, writeError='';
-  var draftStorage = /Electron\//.test(navigator.userAgent) ? localStorage : sessionStorage;
+  var draftStorage = (function () { try { localStorage.setItem('rebot._t', '1'); localStorage.removeItem('rebot._t'); return localStorage; } catch (e) { return sessionStorage; } })();
   var draftKey = 'rebot.autosave.' + location.origin + location.pathname;
   var latestConfig = null;
   function copy(v) { return v === undefined ? undefined : JSON.parse(JSON.stringify(v)); }
@@ -186,9 +186,32 @@
   });
   async function preferences(fields, name) {
     var page=name||document.body.dataset.page, config=await A.api.get('/api/config');
-    function read(){var values={};fields.forEach(function(id){var n=A.el(id);if(n&&n.type!=='password'&&n.type!=='file')values[id]=n.type==='checkbox'?n.checked:n.value;});var result={ui_preferences:{}};result.ui_preferences[page]=values;return result;}
-    function apply(c){var values=(c.ui_preferences||{})[page]||{};fields.forEach(function(id){var n=A.el(id);if(!n||values[id]===undefined)return;if(n.type==='checkbox')n.checked=!!values[id];else if(n.tagName!=='SELECT'||Array.from(n.options).some(function(o){return o.value===String(values[id]);}))n.value=values[id];});}
-    apply(config);return bind({id:'preferences:'+page,root:'#page',read:read,apply:apply,validate:function(){fields.forEach(function(id){var n=A.el(id);if(n&&!n.checkValidity())throw new Error('请检查输入参数的数值范围');});}});
+    var lsKey='rebot.ui_prefs.'+page;
+    var cached={};
+    try{cached=JSON.parse(draftStorage.getItem(lsKey)||'{}')||{};}catch(e){}
+    function read(){
+      var values={};
+      fields.forEach(function(id){
+        var n=A.el(id);
+        if(n&&n.type!=='password'&&n.type!=='file')values[id]=n.type==='checkbox'?n.checked:n.value;
+      });
+      try{draftStorage.setItem(lsKey,JSON.stringify(values));}catch(e){}
+      var result={ui_preferences:{}};
+      result.ui_preferences[page]=values;
+      return result;
+    }
+    function apply(c){
+      var root=(c&&c.ui_preferences)||c||{};
+      var values=Object.assign({},cached,root[page]||{});
+      fields.forEach(function(id){
+        var n=A.el(id);
+        if(!n||values[id]===undefined)return;
+        if(n.type==='checkbox')n.checked=!!values[id];
+        else if(n.tagName!=='SELECT'||Array.from(n.options).some(function(o){return o.value===String(values[id]);}))n.value=values[id];
+      });
+    }
+    apply(config);
+    return bind({id:'preferences:'+page,root:'#page',read:read,apply:apply,validate:function(){fields.forEach(function(id){var n=A.el(id);if(n&&!n.checkValidity())throw new Error('请检查输入参数的数值范围');});}});
   }
   A.autosave = {preferences:preferences,track:function(id,values){external.set(id,Object.assign(external.get(id)||{},values));status();},mount: mount, bind: bind, form: form, write: write, flush: flushAll, changed: schedule, pull: pull,
     onConfig: function (fn) { listeners.push(fn); if (latestConfig) fn(latestConfig); },

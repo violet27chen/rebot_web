@@ -1424,8 +1424,16 @@
     Object.keys(data || {}).forEach(function (k) {
       var f = q('[name="' + k + '"]', form);
       if (!f) return;
-      if (f.type === "checkbox") f.checked = Boolean(data[k]);
-      else f.value = (data[k] === undefined || data[k] === null) ? "" : String(data[k]);
+      if (f.type === "checkbox") {
+        f.checked = Boolean(data[k]);
+      } else {
+        var val = (data[k] === undefined || data[k] === null) ? "" : String(data[k]);
+        if (f.tagName === "SELECT" && f.options && f.options.length > 0 && val !== "") {
+          var hasOpt = Array.prototype.some.call(f.options, function (o) { return o.value === val; });
+          if (!hasOpt) return;
+        }
+        f.value = val;
+      }
     });
   }
   function click(id, fn) {

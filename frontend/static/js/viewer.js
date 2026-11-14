@@ -19,7 +19,10 @@
     }).join("");
     if (!list.length) { A.el("vMeta").textContent = "还没有录制过数据集"; return; }
     var q = new URLSearchParams(location.search).get("repo");
+    var savedRepo = "";
+    try { savedRepo = localStorage.getItem("rebot.viewer.repo") || ""; } catch (e) {}
     if (q && list.some(function (d) { return d.repo_id === q; })) sel.value = q;
+    else if (savedRepo && list.some(function (d) { return d.repo_id === savedRepo; })) sel.value = savedRepo;
     if (!sel.value) sel.selectedIndex = 0;
     await loadEpisodes();
   }
@@ -28,6 +31,7 @@
     stopVideos();
     S.repo = A.el("vRepo").value;
     if (!S.repo) return;
+    try { localStorage.setItem("rebot.viewer.repo", S.repo); } catch (e) {}
     var request=++S.request;
     var r = await A.api.get("/api/dataset/view/episodes?repo_id=" + encodeURIComponent(S.repo));
     if(request!==S.request)return;
