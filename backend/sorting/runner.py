@@ -97,7 +97,7 @@ def main():
             def plan(self,scene,target,action):return call('plan',{'scene_id':scene['scene_id'],'target_id':target['id'],'action':action},timeout=90)
             def execute(self,plan):
                 for point in plan['paths']:move(point['joints'])
-            def scan(self):return call('label',timeout=15)
+            def scan(self,side=None):return call('label',{'side':side} if side else {},timeout=15)
             def retreat(self):
                 goal=proposal['initial_joints'];call('validate',{'from':state()['joints'],'to':goal},timeout=60);move(goal)
             def act_flip(self,target):

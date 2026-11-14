@@ -52,6 +52,10 @@ YOLO 识别 → 深度定位 → 机械臂移到包裹上方（爪头朝下，�
   "label_camera": "/dev/v4l/by-id/...",
   "cycle": {
     "arm": "auto",
+    "wrist_cameras": {
+      "left": "/dev/v4l/by-path/pci-0000:80:14.0-usb-0:1.3:1.0-video-index0",
+      "right": "/dev/v4l/by-id/usb-icSpring_icspring_camera_20240307110322-video-index0"
+    },
     "approach_rpy": {"left": [3.14159, 0, 0], "right": [3.14159, 0, 0]},
     "tool_axis": [0, 0, 1],
     "max_tilt_rad": 0.35,

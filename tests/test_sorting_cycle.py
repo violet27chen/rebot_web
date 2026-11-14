@@ -72,9 +72,12 @@ class FakeIO:
         return near[0] if near else None
     def _find(self, t): return next(q for q in self.p if q['id'] == t['id'])
     def plan(self, scene, target, action):
-        self.cur = self._find(target); self.log.append('plan:%s:%s' % (action, target['id'])); return {'paths': []}
+        self.cur = self._find(target); self.log.append('plan:%s:%s' % (action, target['id']))
+        return {'paths': [], 'side': 'left' if target['xyz_m'][0] <= 0 else 'right'}
     def execute(self, plan): pass
-    def scan(self): return self.cur['scans'].pop(0) if len(self.cur['scans']) > 1 else dict(self.cur['scans'][0])
+    def scan(self, side=None):
+        self.log.append('scan:' + str(side))
+        return self.cur['scans'].pop(0) if len(self.cur['scans']) > 1 else dict(self.cur['scans'][0])
     def act_flip(self, target): self.log.append('flip:' + target['id'])
     def verify_after_push(self, target):
         q = self._find(target)
@@ -163,8 +166,10 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(SortingError): route({'name': 'bag'}, skills, 'flip')
 
     def test_cycle_settings_validation(self):
-        validate_settings({'cycle': {'left_direction': [-1, 0, 0], 'left_push_m': .1, 'arm': 'auto'}})
-        for bad in ({'left_direction': [0, 0, 1]}, {'left_push_m': 1}, {'arm': 'x'}, {'max_flips': 9}):
+        validate_settings({'cycle': {'left_direction': [-1, 0, 0], 'left_push_m': .1, 'arm': 'auto',
+                                     'wrist_cameras': {'left': '/dev/video0', 'right': '/dev/video2'}}})
+        for bad in ({'left_direction': [0, 0, 1]}, {'left_push_m': 1}, {'arm': 'x'}, {'max_flips': 9},
+                    {'wrist_cameras': {'mid': 'x'}}, {'wrist_cameras': 'bad'}):
             with self.assertRaises(SortingError): validate_settings({'cycle': bad})
 
 

@@ -20,8 +20,8 @@ def run_cycle(io, cfg, target, max_rounds=10, max_push_attempts=2):
         io.check();scene = io.scene();target = io.pick(scene, target)
         if target is None:
             raise PackageError('目标丢失（可能被推出或被遮挡）')
-        io.phase('INSPECT_HOVER');io.execute(io.plan(scene, target, 'inspect'))
-        io.phase('SCAN_LABEL');result = io.scan()
+        io.phase('INSPECT_HOVER');plan = io.plan(scene, target, 'inspect');io.execute(plan)
+        io.phase('SCAN_LABEL');result = io.scan(plan.get('side'))
         step = decide(result['status'], rescans, flips, max_flips=int(cfg.get('max_flips', 2)))
         if step == RESCAN:
             rescans += 1;continue

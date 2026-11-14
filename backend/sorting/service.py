@@ -84,16 +84,23 @@ class SortingService:
                               'meta':meta,'rgb_width':image.shape[1],'rgb_height':image.shape[0]}
         finally:rgb.release();depth.release()
 
-    def scan_label(self,source=None):
+    def scan_label(self,source=None,side=None):
         from .label import scan
-        s=self.settings();source=source or s.get('label_camera') or s.get('camera_source')
+        s=self.settings();cyc=s.get('cycle') or {}
+        if not source and side in ('left','right'):
+            source=(cyc.get('wrist_cameras') or {}).get(side)
+            if not source:
+                for cam in (self.h.load_config().get('cameras') or []):
+                    if cam.get('name') in (('左','left','left_wrist') if side=='left' else ('右','right','right_wrist')):
+                        source=cam.get('index_or_path');break
+        source=source or s.get('label_camera') or s.get('camera_source')
         if source in (None,''):raise SortingError('请选择用于读取单号的相机')
         lease=self.h.camera(source)
         try:
             _,image=lease.read()
             if time.time()-lease.captured_at>.5:raise SortingError('单号相机画面已过期')
         finally:lease.release()
-        result=scan(image);result['source']=str(source)
+        result=scan(image);result['source']=str(source);result['side']=side
         if result['status']=='ok':result['destination']=self._destination(result['codes'],s)
         return result
 
@@ -302,14 +309,14 @@ class SortingService:
             if np.any(next_q<limits[:,0]) or np.any(next_q>limits[:,1]):raise SortingError('IK 结果超过已确认的电机关节限位')
             self.kinematics('validate-path',{'from':current.tolist(),'to':next_q.tolist(),'calibration':c})
             paths.append({'joints':next_q.tolist(),'side':side,'xyz_workspace':np.asarray(xyz).tolist()});current=next_q
-        plan={'target':target,'paths':paths,'push':False,'action':action,'initial_joints':q.tolist(),
+        plan={'target':target,'paths':paths,'push':False,'action':action,'side':primary,'initial_joints':q.tolist(),
               'fingerprint':fingerprint(s),'created':time.monotonic(),'scene_id':scene_id}
         if action=='cycle':
             flips={e['class_name']:inspect_skill(e,self.h.root,fingerprint(c)) for e in s['skills'] if e.get('role')=='flip' and e.get('enabled',True)}
             if target['name'] not in flips:raise SortingError('该类别没有登记翻面技能（role=flip）')
             plan.update(mode='cycle',flip_skills=flips,cycle=cyc,skill=flips[target['name']])
         with self.lock:ident=self.remember(self.plans,plan,4)
-        return {'plan_id':ident,'action':action,'paths':paths,'target':target,'expires_in':60}
+        return {'plan_id':ident,'action':action,'side':primary,'paths':paths,'target':target,'expires_in':60}
 
     def close(self):
         for worker in (self.detector,self.kin,self.control):
@@ -341,6 +348,10 @@ def validate_settings(value):
         if cyc.get('min_left_push_m') is not None and not .01<=float(cyc['min_left_push_m'])<=.5:raise SortingError('min_left_push_m 应在 0.01～0.5 米')
         if cyc.get('max_packages') is not None and not 1<=int(cyc['max_packages'])<=500:raise SortingError('max_packages 应在 1～500')
         if cyc.get('max_flips') is not None and not 0<=int(cyc['max_flips'])<=4:raise SortingError('max_flips 应在 0～4')
+        if cyc.get('wrist_cameras') is not None:
+            wc=cyc['wrist_cameras']
+            if not isinstance(wc,dict) or any(k not in ('left','right') or not isinstance(v,str) for k,v in wc.items()):
+                raise SortingError('wrist_cameras 需要 {left,right} 字符串映射')
     if 'label_camera' in value and not isinstance(value['label_camera'],str):raise SortingError('label_camera 需要字符串')
     safe=value.get('safety') or {}
     for name,low,high in [('max_velocity_rad_s',.001,.5),('max_delta_rad',.001,.3),('clearance_m',.05,.3),('max_push_m',.005,.2)]:

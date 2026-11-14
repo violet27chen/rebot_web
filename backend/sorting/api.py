@@ -47,7 +47,7 @@ def attach(app,h):
     @router.post('/capture')
     def capture():return {'ok':True,**service.capture()[2]}
     @router.post('/label/scan')
-    def label_scan(p:dict=Body(default={})):return {'ok':True,**service.scan_label(p.get('source'))}
+    def label_scan(p:dict=Body(default={})):return {'ok':True,**service.scan_label(p.get('source'),p.get('side'))}
     @router.post('/calibration/depth')
     def depth(p:dict=Body(...)):return {'ok':True,'intrinsics':service.adopt_depth(p['frame_id'])}
     @router.post('/calibration/board')
@@ -137,7 +137,7 @@ def attach(app,h):
             return {'ok':True,'value':service.control.call('init',safety,timeout=60)}
         if method=='scene':return {'ok':True,'value':service.scene()}
         if method=='plan':return {'ok':True,'value':service.plan(value['scene_id'],value['target_id'],value.get('action'))}
-        if method=='label':return {'ok':True,'value':service.scan_label()}
+        if method=='label':return {'ok':True,'value':service.scan_label(value.get('source'),value.get('side'))}
         if method=='validate':return {'ok':True,'value':service.kinematics('validate-path',{'from':value['from'],'to':value['to'],'calibration':service.settings()['calibration']})}
         if method=='frames':
             result={}
