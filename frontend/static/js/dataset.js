@@ -102,6 +102,274 @@
     }
   }
 
+  /* ---------------- 数据采集全过程倒计时模态框 ---------------- */
+  var recModal = {
+    mask: null, tickTimer: null, active: false,
+    numEpisodes: 1, epTimeS: 30, resetTimeS: 10, repoId: "",
+    curEp: 1, phase: "init", /* init | recording | reset | saving */
+    phaseStartMs: 0, sessionStartMs: 0, lastLog: ""
+  };
+
+  function fmtSec(sec) {
+    var s = Math.max(0, Math.ceil(sec));
+    var m = Math.floor(s / 60), r = s % 60;
+    return (m < 10 ? "0" + m : String(m)) + ":" + (r < 10 ? "0" + r : String(r));
+  }
+
+  function readRecordParams() {
+    var f = A.el("recordForm");
+    recModal.repoId = (f && f.elements.repo_id && f.elements.repo_id.value) || "";
+    recModal.numEpisodes = Math.max(1, Number((f && f.elements.num_episodes && f.elements.num_episodes.value) || 1));
+    recModal.epTimeS = Math.max(1, Number((f && f.elements.episode_time_s && f.elements.episode_time_s.value) || 30));
+    recModal.resetTimeS = Math.max(0, Number((f && f.elements.reset_time_s && f.elements.reset_time_s.value) || 10));
+  }
+
+  function ensureRecordModal() {
+    if (recModal.mask && recModal.mask.parentNode) return;
+    var mask = document.createElement("div");
+    mask.className = "modal-mask";
+    mask.id = "recordCountdownModal";
+    mask.innerHTML =
+      '<div class="notify-modal" style="width:min(540px,96vw)" role="dialog" aria-modal="true" aria-labelledby="recModalTitle">' +
+        '<div class="notify-head" style="display:flex;justify-content:space-between;align-items:center">' +
+          '<span class="notify-title" id="recModalTitle">正在采集数据</span>' +
+          '<span class="badge" id="recModalBadge">准备中</span>' +
+        '</div>' +
+        '<div class="notify-msg" style="padding:16px 20px">' +
+          '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">' +
+            '<span id="recModalEpInfo" style="font-weight:600;font-size:15px">剧集 1 / 1</span>' +
+            '<span id="recModalTotalInfo" class="muted" style="font-size:13px">总剩余约 --:--</span>' +
+          '</div>' +
+          '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:12px 0">' +
+            '<div id="recBoxEp" style="border:2px solid var(--primary,#2563eb);border-radius:10px;padding:12px;text-align:center;background:var(--bg-subtle,rgba(37,99,235,0.06))">' +
+              '<div style="font-size:12.5px;color:var(--muted,#64748b);margin-bottom:4px">当前集录制剩余时间</div>' +
+              '<div id="recEpRemain" style="font-size:32px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.15">00:30</div>' +
+              '<div id="recEpSub" style="font-size:12px;color:var(--muted,#64748b);margin-top:4px">单集时长 30s</div>' +
+            '</div>' +
+            '<div id="recBoxReset" style="border:2px solid var(--border,#e2e8f0);border-radius:10px;padding:12px;text-align:center">' +
+              '<div style="font-size:12.5px;color:var(--muted,#64748b);margin-bottom:4px">重置环境剩余时间</div>' +
+              '<div id="recResetRemain" style="font-size:32px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.15">00:10</div>' +
+              '<div id="recResetSub" style="font-size:12px;color:var(--muted,#64748b);margin-top:4px">重置时长 10s</div>' +
+            '</div>' +
+          '</div>' +
+          '<div class="fb-bar" style="height:8px;border-radius:4px;overflow:hidden;margin:10px 0"><i id="recModalBar" style="display:block;height:100%;width:0%;background:var(--primary,#2563eb);transition:width .25s"></i></div>' +
+          '<div id="recModalHint" class="note" style="margin-top:8px;font-size:12.5px">正在连接主从臂与摄像头，请稍候…</div>' +
+        '</div>' +
+        '<div class="notify-foot" style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap">' +
+          '<div class="btn-row" style="gap:6px">' +
+            '<button type="button" class="btn subtle sm" data-rec-key="right" title="提前结束当前阶段进入下一阶段">→ 下一集</button>' +
+            '<button type="button" class="btn subtle sm" data-rec-key="left" title="作废当前集并重录">← 重录本集</button>' +
+          '</div>' +
+          '<div class="btn-row" style="gap:8px">' +
+            '<button type="button" class="btn danger" id="recModalStop">停止录制</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    A.modalHost().appendChild(mask);
+    recModal.mask = mask;
+
+    Array.from(mask.querySelectorAll("[data-rec-key]")).forEach(function (b) {
+      b.addEventListener("click", async function () {
+        var k = b.getAttribute("data-rec-key");
+        try {
+          await A.api.post("/api/record/key", { key: k });
+          A.toast("已发送按键 " + k.toUpperCase(), "ok");
+        } catch (e) { A.toast(e.message, "err"); }
+      });
+    });
+
+    mask.querySelector("#recModalStop").addEventListener("click", async function () {
+      var btn = mask.querySelector("#recModalStop");
+      btn.disabled = true;
+      btn.textContent = "正在停止并保存…";
+      recModal.phase = "saving";
+      updateRecordModalUI();
+      try {
+        var s = A.status();
+        var j = (s && s.job) || {};
+        if (s && s.running && j.kind === "record") {
+          await A.api.post("/api/record/key", { key: "esc" });
+          A.ok("已发送停止指令（ESC）：正在保存并编码当前剧集，结束后自动关闭", "#dsAlert");
+        } else {
+          await A.stop();
+          closeRecordModal();
+        }
+        A.refreshStatus();
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = "停止录制";
+        A.toast(e.message, "err");
+      }
+    });
+  }
+
+  function updateRecordModalUI() {
+    var mask = recModal.mask;
+    if (!mask || !recModal.active) return;
+    var now = Date.now();
+    var elapsedPhase = (now - recModal.phaseStartMs) / 1000;
+
+    /* 当真实日志因缓冲延迟未到达时，按时间自动推演阶段 전환 */
+    if (recModal.phase === "recording" && elapsedPhase >= recModal.epTimeS) {
+      if (recModal.curEp < recModal.numEpisodes && recModal.resetTimeS > 0) {
+        recModal.phase = "reset";
+        recModal.phaseStartMs = now;
+        elapsedPhase = 0;
+      } else if (recModal.curEp < recModal.numEpisodes) {
+        recModal.curEp++;
+        recModal.phaseStartMs = now;
+        elapsedPhase = 0;
+      } else {
+        recModal.phase = "saving";
+        recModal.phaseStartMs = now;
+        elapsedPhase = 0;
+      }
+    } else if (recModal.phase === "reset" && elapsedPhase >= recModal.resetTimeS) {
+      if (recModal.curEp < recModal.numEpisodes) {
+        recModal.curEp++;
+        recModal.phase = "recording";
+        recModal.phaseStartMs = now;
+        elapsedPhase = 0;
+      } else {
+        recModal.phase = "saving";
+        recModal.phaseStartMs = now;
+        elapsedPhase = 0;
+      }
+    }
+
+    var badge = mask.querySelector("#recModalBadge");
+    var epInfo = mask.querySelector("#recModalEpInfo");
+    var totalInfo = mask.querySelector("#recModalTotalInfo");
+    var epRemain = mask.querySelector("#recEpRemain");
+    var epSub = mask.querySelector("#recEpSub");
+    var resetRemain = mask.querySelector("#recResetRemain");
+    var resetSub = mask.querySelector("#recResetSub");
+    var boxEp = mask.querySelector("#recBoxEp");
+    var boxReset = mask.querySelector("#recBoxReset");
+    var bar = mask.querySelector("#recModalBar");
+    var hint = mask.querySelector("#recModalHint");
+
+    epInfo.textContent = "剧集 " + recModal.curEp + " / " + recModal.numEpisodes +
+      (recModal.repoId ? (" · " + recModal.repoId) : "");
+    epSub.textContent = "单集时长 " + recModal.epTimeS + "s";
+    resetSub.textContent = recModal.curEp >= recModal.numEpisodes ? "最后一集无重置" : ("重置时长 " + recModal.resetTimeS + "s");
+
+    var curEpLeft = recModal.epTimeS;
+    var curResetLeft = recModal.curEp >= recModal.numEpisodes ? 0 : recModal.resetTimeS;
+    var pct = 0;
+
+    if (recModal.phase === "init") {
+      badge.textContent = "启动与连接设备";
+      badge.className = "badge";
+      curEpLeft = recModal.epTimeS;
+      curResetLeft = recModal.curEp >= recModal.numEpisodes ? 0 : recModal.resetTimeS;
+      boxEp.style.borderColor = "var(--border,#e2e8f0)";
+      boxEp.style.background = "transparent";
+      boxReset.style.borderColor = "var(--border,#e2e8f0)";
+      boxReset.style.background = "transparent";
+      pct = 2;
+      hint.textContent = recModal.lastLog || "正在初始化主从臂与摄像头，进入录制后自动开始倒计时…";
+    } else if (recModal.phase === "recording") {
+      curEpLeft = Math.max(0, recModal.epTimeS - elapsedPhase);
+      curResetLeft = recModal.curEp >= recModal.numEpisodes ? 0 : recModal.resetTimeS;
+      badge.textContent = "正在录制第 " + recModal.curEp + " 集";
+      badge.className = "badge ok";
+      boxEp.style.borderColor = "var(--primary,#2563eb)";
+      boxEp.style.background = "var(--bg-subtle,rgba(37,99,235,0.08))";
+      boxReset.style.borderColor = "var(--border,#e2e8f0)";
+      boxReset.style.background = "transparent";
+      pct = Math.min(100, Math.max(0, (elapsedPhase / recModal.epTimeS) * 100));
+      hint.textContent = "请操作主臂完成动作示教；本集倒计时结束后将自动进入重置阶段。";
+    } else if (recModal.phase === "reset") {
+      curEpLeft = 0;
+      curResetLeft = Math.max(0, recModal.resetTimeS - elapsedPhase);
+      badge.textContent = "重置环境倒计时";
+      badge.className = "badge warn";
+      boxEp.style.borderColor = "var(--border,#e2e8f0)";
+      boxEp.style.background = "transparent";
+      boxReset.style.borderColor = "#f59e0b";
+      boxReset.style.background = "rgba(245,158,11,0.08)";
+      pct = recModal.resetTimeS > 0 ? Math.min(100, Math.max(0, (elapsedPhase / recModal.resetTimeS) * 100)) : 100;
+      hint.textContent = "请趁重置倒计时将桌面上的快递恢复到初始摆放位置，准备下一集录制。";
+    } else {
+      curEpLeft = 0;
+      curResetLeft = 0;
+      badge.textContent = "正在保存并编码视频";
+      badge.className = "badge";
+      boxEp.style.borderColor = "var(--border,#e2e8f0)";
+      boxEp.style.background = "transparent";
+      boxReset.style.borderColor = "var(--border,#e2e8f0)";
+      boxReset.style.background = "transparent";
+      pct = 100;
+      hint.textContent = recModal.lastLog || "正在编码视频并安全收尾，完全结束后此窗口将自动关闭…";
+    }
+
+    epRemain.textContent = fmtSec(curEpLeft);
+    resetRemain.textContent = fmtSec(curResetLeft);
+    bar.style.width = pct.toFixed(1) + "%";
+
+    var futureEps = Math.max(0, recModal.numEpisodes - recModal.curEp);
+    var futureSec = futureEps * recModal.epTimeS + Math.max(0, futureEps - 1) * recModal.resetTimeS;
+    var totalLeft = recModal.phase === "saving" ? 0 : (curEpLeft + curResetLeft + futureSec);
+    totalInfo.textContent = recModal.phase === "saving" ? "正在收尾保存…" : ("整个采集预计剩余 " + fmtSec(totalLeft));
+  }
+
+  function openRecordModal() {
+    readRecordParams();
+    recModal.active = true;
+    recModal.curEp = 1;
+    recModal.phase = "init";
+    recModal.phaseStartMs = Date.now();
+    recModal.sessionStartMs = Date.now();
+    recModal.lastLog = "";
+    ensureRecordModal();
+    var btn = recModal.mask.querySelector("#recModalStop");
+    if (btn) { btn.disabled = false; btn.textContent = "停止录制"; }
+    updateRecordModalUI();
+    clearInterval(recModal.tickTimer);
+    recModal.tickTimer = setInterval(updateRecordModalUI, 250);
+  }
+
+  function closeRecordModal() {
+    recModal.active = false;
+    clearInterval(recModal.tickTimer);
+    recModal.tickTimer = null;
+    if (recModal.mask && recModal.mask.parentNode) {
+      recModal.mask.parentNode.removeChild(recModal.mask);
+    }
+    recModal.mask = null;
+  }
+
+  function onRecordLogLine(line) {
+    if (!recModal.active || !line) return;
+    recModal.lastLog = line;
+    var mEp = line.match(/Recording episode\s+(\d+)/i);
+    if (mEp) {
+      recModal.curEp = Math.min(recModal.numEpisodes, Math.max(1, parseInt(mEp[1], 10) + 1));
+      recModal.phase = "recording";
+      recModal.phaseStartMs = Date.now();
+      updateRecordModalUI();
+      return;
+    }
+    if (/Reset the environment/i.test(line)) {
+      recModal.phase = "reset";
+      recModal.phaseStartMs = Date.now();
+      updateRecordModalUI();
+      return;
+    }
+    if (/Re-record episode/i.test(line)) {
+      recModal.phase = "recording";
+      recModal.phaseStartMs = Date.now();
+      updateRecordModalUI();
+      return;
+    }
+    if (/Stop recording|Finalize|Encoding|safe_record/i.test(line)) {
+      recModal.phase = "saving";
+      recModal.phaseStartMs = Date.now();
+      updateRecordModalUI();
+    }
+  }
+
   A.el("recordForm").addEventListener("submit", function (e) {
     e.preventDefault();
     A.action(async function () {
@@ -114,7 +382,8 @@
       A.clearAlert("#dsAlert");
       await A.autosave.flush();
       await A.api.post("/api/record/start", {});
-      A.ok("采集任务已启动，录制窗口键盘控制见下方按钮", "#dsAlert");
+      openRecordModal();
+      A.ok("采集任务已启动", "#dsAlert");
       A.refreshStatus();
     }, "#dsAlert");
   });
@@ -281,13 +550,27 @@
 
   var timer = null;
   A.onLog(function (ev) {
-    if (ev.type === "state" && ev.running === false) {
-      clearTimeout(timer);
-      timer = setTimeout(function () { loadDatasets(true); }, 800);
+    if (ev.type === "log" && ev.line) {
+      onRecordLogLine(ev.line);
+    }
+    if (ev.type === "state") {
+      if (ev.running && ev.kind === "record" && !recModal.active) {
+        openRecordModal();
+      } else if (ev.running === false) {
+        if (recModal.active) closeRecordModal();
+        clearTimeout(timer);
+        timer = setTimeout(function () { loadDatasets(true); }, 800);
+      }
     }
   });
 
+  window.addEventListener("pagehide", function () { closeRecordModal(); });
+
   await loadConfig();
+  var initSt = A.status();
+  if (initSt && initSt.running && initSt.job && initSt.job.kind === "record") {
+    openRecordModal();
+  }
   A.autosave.form('recordForm','dataset');
   await loadDatasets(true);
   A.autosave.onConfig(function(){A.commandPreview('record','#workflowCommand');});
