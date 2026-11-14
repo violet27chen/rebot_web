@@ -42,7 +42,7 @@
       <div class="card-h"><div><h2 id="sortingTitle">包裹定位与技能执行</h2><p class="hint">固定俯视 RGB-D → YOLO 类别与高度 → 规则推拢到训练区域 → 对应的独立 ACT 技能</p></div><span class="badge" id="sortingState">读取配置…</span></div>
       <div class="alert" id="sortingAlert" role="alert"></div>
       <p class="note" id="sortingRequirements">正在核对标定和技能配置…</p>
-      <div id="sortingConfig"><div class="row"><div class="field"><label for="sortingYolo">包裹 YOLO 检测模型（本地 .pt）</label><input id="sortingYolo" placeholder="/绝对路径/parcel_best.pt"></div><div class="field"><label for="sortingDevice">推理设备</label><select id="sortingDevice"><option value="cuda">CUDA</option><option value="cpu">CPU</option></select></div><div class="field"><label for="sortingConfidence">检测置信度</label><input id="sortingConfidence" type="number" min="0.1" max="0.99" step="0.05" value="0.6"></div><div class="field"><label for="sortingUseDepth">视觉三维定位模式</label><select id="sortingUseDepth"><option value="true">RGB-D 深度点云定位（推荐）</option><option value="false">纯 RGB 桌面平面几何定位（免深度相机）</option></select></div><div class="field narrow"><label for="sortingDefaultHeight">纯RGB默认包裹高(m)</label><input id="sortingDefaultHeight" type="number" min="0.005" max="0.35" step="0.005" value="0.035"></div></div>
+      <div id="sortingConfig"><div class="row"><div class="field wide"><label for="sortingYolo">包裹 YOLO 检测模型（下拉直接选择 .pt）</label><select id="sortingYolo"><option value="yolo11n-seg.pt">yolo11n-seg.pt（预置分割模型）</option><option value="yolo11n.pt">yolo11n.pt（预置检测模型）</option><option value="models/yoloe-26s-seg.pt">models/yoloe-26s-seg.pt</option><option value="models/yolov8s-world.pt">models/yolov8s-world.pt</option></select></div><div class="field"><label for="sortingDevice">推理设备</label><select id="sortingDevice"><option value="cuda">CUDA</option><option value="cpu">CPU</option></select></div><div class="field"><label for="sortingConfidence">检测置信度</label><input id="sortingConfidence" type="number" min="0.1" max="0.99" step="0.05" value="0.6"></div><div class="field"><label for="sortingUseDepth">视觉三维定位模式</label><select id="sortingUseDepth"><option value="true">RGB-D 深度点云定位（推荐）</option><option value="false">纯 RGB 桌面平面几何定位（免深度相机）</option></select></div><div class="field narrow"><label for="sortingDefaultHeight">纯RGB默认包裹高(m)</label><input id="sortingDefaultHeight" type="number" min="0.005" max="0.35" step="0.005" value="0.035"></div></div>
       <details class="advanced-settings" open><summary>独立 ACT 技能登记（点选即可，无需手写 JSON）</summary>
         <p class="hint">若只用「持续分拣清桌 / 悬停扫码 / 向左推走」，无需配置此项即可直接运行；当包裹面单朝下需要调用训练好的 ACT 模型翻面或抓取时，在下方下拉框选择并点击「添加/更新技能」即可自动读取标定、相机与当前真机姿态。</p>
         <div class="row" style="margin-top:8px">
@@ -86,7 +86,7 @@
   </div>
   <script src="/static/js/common.js?v=3.5.0-20261114-7"></script>
   <script src="/static/js/autosave.js?v=3.4.1-20261114-2"></script>
-  <script src="/static/js/sorting-console.js?v=3.5.0-20261114-9"></script>
+  <script src="/static/js/sorting-console.js?v=3.5.0-20261114-10"></script>
   <script src="/static/js/eval.js?v=3.4.1-20261114-2"></script>
 </body>
 </html>

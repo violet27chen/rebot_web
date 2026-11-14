@@ -2826,23 +2826,36 @@ def list_datasets() -> list[dict]:
 
 def list_checkpoints() -> list[dict]:
     out: list[dict] = []
+    seen: set[str] = set()
+    def _add(rel_path: str, cfg_path: str = ""):
+        rel = rel_path.replace("\\", "/")
+        if rel not in seen:
+            seen.add(rel)
+            out.append({"path": rel, "config": cfg_path.replace("\\", "/") if cfg_path else ""})
     try:
         if OUTPUTS_DIR.exists():
             for d in sorted(OUTPUTS_DIR.rglob("pretrained_model")):
                 if d.is_dir():
                     cfg = d / "train_config.json"
-                    out.append({"path": str(d.relative_to(ROOT)).replace("\\", "/"),
-                                "config": str(cfg.relative_to(ROOT)).replace("\\", "/")
-                                if cfg.exists() else ""})
-            for p in sorted(OUTPUTS_DIR.rglob("*.xml")) + sorted(OUTPUTS_DIR.rglob("*.pt")):
-                out.append({"path": str(p.relative_to(ROOT)).replace("\\", "/"), "config": ""})
+                    _add(str(d.relative_to(ROOT)), str(cfg.relative_to(ROOT)) if cfg.exists() else "")
+            for p in sorted(OUTPUTS_DIR.rglob("*.xml")):
+                _add(str(p.relative_to(ROOT)))
+            # Trained best.pt first, then other .pt under outputs/
+            pts = sorted(OUTPUTS_DIR.rglob("*.pt"), key=lambda x: (0 if x.name == "best.pt" else 1, str(x)))
+            for p in pts:
+                _add(str(p.relative_to(ROOT)))
         # Ultralytics 旧版本/旧路径会把权重写到 runs/detect/...，也一起列出来
         runs = ROOT / "runs"
         if runs.is_dir():
-            for p in sorted(runs.rglob("*.pt")):
-                rel = str(p.relative_to(ROOT)).replace("\\", "/")
-                if not any(x["path"] == rel for x in out):
-                    out.append({"path": rel, "config": ""})
+            for p in sorted(runs.rglob("*.pt"), key=lambda x: (0 if x.name == "best.pt" else 1, str(x))):
+                _add(str(p.relative_to(ROOT)))
+        # 项目 models/ 目录与根目录下的本地 .pt 权重
+        models_dir = ROOT / "models"
+        if models_dir.is_dir():
+            for p in sorted(models_dir.glob("*.pt")):
+                _add(str(p.relative_to(ROOT)))
+        for p in sorted(ROOT.glob("*.pt")):
+            _add(str(p.relative_to(ROOT)))
     except OSError as exc:
         HUB.log(f"[checkpoint] 扫描失败：{_brief(exc)}", "warn")
     return out

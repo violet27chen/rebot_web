@@ -130,7 +130,13 @@ python -c "from transformers import AutoProcessor, AutoModelForZeroShotObjectDet
     <div class="card">
       <div class="card-h"><h2>4 · 训练 YOLO 模型</h2><span class="sub">先训练生成本地 .pt 权重，再在下一步验证效果</span></div>
       <div class="row">
-        <div class="field"><label>预训练权重</label><input id="yModel" value="yolov8n.pt"></div>
+        <div class="field wide"><label>预训练权重（下拉选择 .pt）</label><select id="yModel">
+          <option value="yolo11n.pt">yolo11n.pt（预置检测模型 · 推荐）</option>
+          <option value="yolo11n-seg.pt">yolo11n-seg.pt（预置实例分割模型）</option>
+          <option value="models/yolov8s-world.pt">models/yolov8s-world.pt</option>
+          <option value="models/yoloe-26s-seg.pt">models/yoloe-26s-seg.pt</option>
+          <option value="yolov8n.pt">yolov8n.pt</option>
+        </select></div>
         <div class="field narrow"><label>epochs</label><input id="yEpochs" type="number" value="50"></div>
         <div class="field narrow"><label>imgsz</label><input id="yImgsz" type="number" value="640"></div>
         <div class="field narrow"><label>batch</label><input id="yBatch" type="number" value="8"></div>
@@ -174,6 +180,6 @@ python -c "from transformers import AutoProcessor, AutoModelForZeroShotObjectDet
   </div>
   <script src="/static/js/common.js?v=3.5.0-20261114-6"></script>
   <script src="/static/js/autosave.js?v=3.4.1-20261114-2"></script>
-  <script src="/static/js/yolo.js?v=3.5.0-20261114-6"></script>
+  <script src="/static/js/yolo.js?v=3.5.0-20261114-7"></script>
 </body>
 </html>

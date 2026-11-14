@@ -52,6 +52,9 @@ class SortingService:
         s=self.settings();raw_model=(s.get('yolo_model') or '').strip() or 'yolo11n-seg.pt'
         path=Path(raw_model).expanduser()
         if not path.is_absolute():path=self.h.root/path
+        if not path.is_file():
+            for alt in (self.h.root/'models'/path.name,self.h.root/'models/yolo11n-seg.pt',self.h.root/'yolo11n-seg.pt',self.h.root/'models/yolo11n.pt'):
+                if alt.is_file():path=alt;break
         if not path.is_file() or path.suffix!='.pt':raise SortingError('请先选择本地训练完成的 YOLO .pt 检测模型')
         key=(str(path),path.stat().st_mtime_ns,s['device'])
         with self.lock:

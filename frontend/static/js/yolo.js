@@ -938,10 +938,23 @@
         return;
       }
       sel.innerHTML = pts.map(function (p) {
-        return '<option value="' + A.esc(p) + '">' + A.esc(p) + "</option>";
+        var tag = /^outputs\/|^runs\//i.test(p) ? "（已训练模型）" : "（预置模型）";
+        return '<option value="' + A.esc(p) + '">' + A.esc(p) + tag + "</option>";
       }).join("");
       var want = A.load("yolo.model", "");
       if (want && pts.indexOf(want) >= 0) sel.value = want;
+      var ySel = A.el("yModel");
+      if (ySel && ySel.tagName === "SELECT") {
+        var curY = ySel.value || "yolo11n.pt";
+        var baseOpts = ["yolo11n.pt", "yolo11n-seg.pt", "models/yolov8s-world.pt", "models/yoloe-26s-seg.pt", "yolov8n.pt"];
+        pts.forEach(function (p) { if (baseOpts.indexOf(p) < 0) baseOpts.push(p); });
+        if (curY && baseOpts.indexOf(curY) < 0) baseOpts.unshift(curY);
+        ySel.innerHTML = baseOpts.map(function (p) {
+          var tag = /^outputs\/|^runs\//i.test(p) ? "（继续微调已训练模型）" : "";
+          return '<option value="' + A.esc(p) + '">' + A.esc(p) + tag + "</option>";
+        }).join("");
+        ySel.value = curY;
+      }
     } catch (e) { /* 忽略 */ }
   }
 

@@ -37,7 +37,20 @@
     async function loadSkillOptions(cfg){
       try{
         var ckRes=await A.api.get('/api/checkpoints');
-        var ckpts=(ckRes.checkpoints||[]).filter(function(c){return !/\.pt$|\.xml$/i.test(c.path);});
+        var allCkpts=ckRes.checkpoints||[];
+        var yoloSel=A.el('sortingYolo');
+        if(yoloSel){
+          var pts=allCkpts.filter(function(c){return /\.pt$/i.test(c.path);}).map(function(c){return c.path;});
+          ['yolo11n-seg.pt','yolo11n.pt','models/yoloe-26s-seg.pt','models/yolov8s-world.pt'].forEach(function(p){if(pts.indexOf(p)<0)pts.push(p);});
+          var curYolo=((cfg&&cfg.sorting&&cfg.sorting.yolo_model)||yoloSel.value||'yolo11n-seg.pt').trim();
+          if(curYolo&&pts.indexOf(curYolo)<0)pts.unshift(curYolo);
+          yoloSel.innerHTML=pts.map(function(p){
+            var tag=/^outputs\/|^runs\//i.test(p)?'（已训练模型）':(/yolo11n-seg\.pt$/i.test(p)?'（预置分割模型）':(/yolo11n\.pt$/i.test(p)?'（预置检测模型）':''));
+            return '<option value="'+A.esc(p)+'">'+A.esc(p)+tag+'</option>';
+          }).join('');
+          yoloSel.value=curYolo;
+        }
+        var ckpts=allCkpts.filter(function(c){return !/\.pt$|\.xml$/i.test(c.path);});
         var skCkpt=A.el('skCkpt');
         if(skCkpt){
           var evalP=(cfg&&cfg.eval&&cfg.eval.policy_path)||'';
@@ -55,7 +68,14 @@
       }catch(e){}
     }
     function apply(c){var s=c.sorting||{},safe=s.safety||{},cyc=s.cycle||{};
-      A.el('sortingYolo').value=s.yolo_model||'yolo11n-seg.pt';A.el('sortingDevice').value=s.device||'cuda';A.el('sortingConfidence').value=s.confidence===undefined?.35:s.confidence;
+      var wantYolo=(s.yolo_model||'yolo11n-seg.pt').trim(),yEl=A.el('sortingYolo');
+      if(yEl){
+        if(!Array.from(yEl.options||[]).some(function(o){return o.value===wantYolo;})){
+          var opt=document.createElement('option');opt.value=wantYolo;opt.textContent=wantYolo;yEl.insertBefore(opt,yEl.firstChild);
+        }
+        yEl.value=wantYolo;
+      }
+      A.el('sortingDevice').value=s.device||'cuda';A.el('sortingConfidence').value=s.confidence===undefined?.35:s.confidence;
       if(A.el('sortingUseDepth'))A.el('sortingUseDepth').value=String(s.use_depth!==false);
       if(A.el('sortingDefaultHeight'))A.el('sortingDefaultHeight').value=s.default_height_m===undefined?0.035:s.default_height_m;
       A.el('sortingSkills').value=pretty(s.skills||[]);renderSkillTable(s.skills||[]);
