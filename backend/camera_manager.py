@@ -143,6 +143,12 @@ class _Session:
                         break
                 valid, frame = cap.read()
                 if not valid:
+                    w, h = self.actual.get('width', 0), self.actual.get('height', 0)
+                    if self.seq == 0 and w * h > 640 * 480:
+                        raise CameraError(
+                            f'{self.key} 在 {w}×{h} 下无法启动取流（常见原因：USB 2.0 带宽预留失败，'
+                            'v4l2 报 No space left on device；多个相机/音频设备挂在同一 USB 控制器时容易出现）。'
+                            '处理：先点「暂停全部」，只预览这一路再试；或把相机插到不同 USB 控制器的接口；或改用 640×480 / 降低帧率')
                     raise CameraError(f'{self.key} 未返回图像。检查 USB 带宽、MJPG 格式、设备占用或重新插拔相机')
                 encoded, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
                 if not encoded:
