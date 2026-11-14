@@ -15,7 +15,7 @@ from .skills import route,inspect_skill,NAMES
 from .pushleft import push_left_poses,gripper_down_ok,left_direction
 from .ipc import Worker
 
-DEFAULTS={'camera_source':'','yolo_model':'','device':'cuda','confidence':.6,'control_python':'',
+DEFAULTS={'camera_source':'','yolo_model':'yolo11n-seg.pt','device':'cuda','confidence':.35,'control_python':'',
           'use_depth':True,'default_height_m':.035,
           'calibration':{'mount':'fixed','arms':{}},'skills':[],
           'safety':{'torque_limits_nm':None,'joint_limits_rad':None,'max_velocity_rad_s':.25,
@@ -33,6 +33,8 @@ class SortingService:
         for k,v in (self.h.load_config().get('sorting') or {}).items():
             if isinstance(v,dict) and isinstance(value.get(k),dict):value[k].update(v)
             else:value[k]=v
+        if not (value.get('yolo_model') or '').strip() and (self.h.root/'yolo11n-seg.pt').is_file():
+            value['yolo_model']='yolo11n-seg.pt'
         return value
 
     def save(self,patch):
@@ -47,7 +49,8 @@ class SortingService:
         return self.settings().get('control_python') or (str(local) if local.is_file() else self.h.python())
 
     def prepare_detector(self):
-        s=self.settings();path=Path(s['yolo_model']).expanduser()
+        s=self.settings();raw_model=(s.get('yolo_model') or '').strip() or 'yolo11n-seg.pt'
+        path=Path(raw_model).expanduser()
         if not path.is_absolute():path=self.h.root/path
         if not path.is_file() or path.suffix!='.pt':raise SortingError('请先选择本地训练完成的 YOLO .pt 检测模型')
         key=(str(path),path.stat().st_mtime_ns,s['device'])
@@ -318,7 +321,9 @@ class SortingService:
                 packages.extend(self._depth_foreground_packages(frame['depth'],frame['rgb'].shape,s['calibration'],len(packages)))
         for package in packages:
             try:package['skill']=route(package,s['skills'])['name']
-            except SortingError as exc:package['route_error']=str(exc)
+            except SortingError:
+                try:package['skill']=route(package,s['skills'],role='flip')['name']+' (翻面+推左)'
+                except SortingError:package['skill']='持续分拣（悬停扫码→向左推走）'
         scene=dict(frame_id=key,targets=packages,timestamp=frame['timestamp'],fingerprint=fingerprint(s))
         with self.lock:ident=self.remember(self.scenes,scene)
         return dict(preview,scene_id=ident,targets=packages,timestamp=frame['timestamp'])
@@ -391,6 +396,9 @@ class SortingService:
         if not scene or time.time()-scene['timestamp']>20 or scene['fingerprint']!=fingerprint(s):raise SortingError('检测结果已过期或配置变化，请重新检测')
         target=next((t for t in scene['targets'] if t['id']==str(target_id) and t.get('valid')),None)
         if not target:raise SortingError('请选择有有效深度的目标')
+        try:route(target,s['skills'])
+        except SortingError:
+            return self._plan_cycle(scene_id,target_id,'cycle')
         c=s['calibration'];self.check_camera(s);validate_calibration(c,('left','right'))
         entry=inspect_skill(route(target,s['skills']),self.h.root,fingerprint(c))
         if entry.get('arm') not in ('left','right'):raise SortingError('技能需指定主动从臂')

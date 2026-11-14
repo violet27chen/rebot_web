@@ -6,7 +6,7 @@
     function pretty(v){return v===undefined||v===null?'':JSON.stringify(v,null,2);}
     function parsed(v,name,fallback){if(!v.trim())return fallback;try{return JSON.parse(v);}catch(e){throw new Error(name+'不是有效 JSON');}}
     function apply(c){var s=c.sorting||{},safe=s.safety||{},cyc=s.cycle||{};
-      A.el('sortingYolo').value=s.yolo_model||'';A.el('sortingDevice').value=s.device||'cuda';A.el('sortingConfidence').value=s.confidence===undefined?.6:s.confidence;
+      A.el('sortingYolo').value=s.yolo_model||'yolo11n-seg.pt';A.el('sortingDevice').value=s.device||'cuda';A.el('sortingConfidence').value=s.confidence===undefined?.35:s.confidence;
       if(A.el('sortingUseDepth'))A.el('sortingUseDepth').value=String(s.use_depth!==false);
       if(A.el('sortingDefaultHeight'))A.el('sortingDefaultHeight').value=s.default_height_m===undefined?0.035:s.default_height_m;
       A.el('sortingSkills').value=pretty(s.skills||[]);A.el('sortingTorque').value=pretty(safe.torque_limits_nm);A.el('sortingLimits').value=pretty(safe.joint_limits_rad);
