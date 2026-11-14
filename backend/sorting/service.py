@@ -305,9 +305,9 @@ class SortingService:
         plan={'target':target,'paths':paths,'push':False,'action':action,'initial_joints':q.tolist(),
               'fingerprint':fingerprint(s),'created':time.monotonic(),'scene_id':scene_id}
         if action=='cycle':
-            flip=inspect_skill(route(target,s['skills'],'flip'),self.h.root,fingerprint(c))
-            if not inside(package,flip['training_bounds']):raise SortingError('包裹不在翻面技能的训练区域内，请先摆放到该区域')
-            plan.update(mode='cycle',flip_skill=flip,cycle=cyc,skill=flip)
+            flips={e['class_name']:inspect_skill(e,self.h.root,fingerprint(c)) for e in s['skills'] if e.get('role')=='flip' and e.get('enabled',True)}
+            if target['name'] not in flips:raise SortingError('该类别没有登记翻面技能（role=flip）')
+            plan.update(mode='cycle',flip_skills=flips,cycle=cyc,skill=flips[target['name']])
         with self.lock:ident=self.remember(self.plans,plan,4)
         return {'plan_id':ident,'action':action,'paths':paths,'target':target,'expires_in':60}
 
@@ -339,6 +339,7 @@ def validate_settings(value):
         if cyc.get('arm') not in (None,'','auto','left','right'):raise SortingError('cycle.arm 只能是 auto/left/right')
         if cyc.get('left_push_m') is not None and not .005<=float(cyc['left_push_m'])<=.2:raise SortingError('left_push_m 应在 0.005～0.2 米')
         if cyc.get('min_left_push_m') is not None and not .01<=float(cyc['min_left_push_m'])<=.5:raise SortingError('min_left_push_m 应在 0.01～0.5 米')
+        if cyc.get('max_packages') is not None and not 1<=int(cyc['max_packages'])<=500:raise SortingError('max_packages 应在 1～500')
         if cyc.get('max_flips') is not None and not 0<=int(cyc['max_flips'])<=4:raise SortingError('max_flips 应在 0～4')
     if 'label_camera' in value and not isinstance(value['label_camera'],str):raise SortingError('label_camera 需要字符串')
     safe=value.get('safety') or {}

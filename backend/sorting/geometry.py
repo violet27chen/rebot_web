@@ -10,6 +10,11 @@ class SortingError(ValueError):
     pass
 
 
+class PackageError(SortingError):
+    """只影响当前这一个包裹的可恢复失败；设备故障、安全限位等仍是普通 SortingError，会终止整个会话。"""
+    pass
+
+
 def array(value, shape, name):
     try:a=np.asarray(value,dtype=float)
     except (TypeError,ValueError):raise SortingError(name+' 必须是有效数值')

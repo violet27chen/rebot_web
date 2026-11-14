@@ -81,26 +81,30 @@ def main():
         call('hold')
 
     def cycle_mode():
-        from .cycle import run_cycle
-        cfg=proposal.get('cycle') or {};flip=proposal['flip_skill'];loaded=[None]
+        from .cycle import run_session
+        from .geometry import PackageError
+        from .pushleft import left_direction
+        cfg=proposal.get('cycle') or {};flips=proposal['flip_skills'];loaded=[None]
         class IO:
             def check(self):check()
             def phase(self,name):phase(name)
             def scene(self):return call('scene',timeout=60)
             def pick(self,scene,previous):
-                valid=[t for t in scene['targets'] if t.get('valid')]
-                if previous is None:
-                    names=[t for t in valid if t['name']==proposal['target']['name']]
-                    near=sorted(names,key=lambda t:np.linalg.norm(np.array(t['xyz_m'])-proposal['target']['xyz_m']))
-                    return near[0] if near and np.linalg.norm(np.array(near[0]['xyz_m'])-proposal['target']['xyz_m'])<.05 else None
-                near=[t for t in valid if t['name']==previous['name'] and np.linalg.norm(np.array(t['xyz_m'])-previous['xyz_m'])<.12]
-                if len(near)>1:raise SortingError('出现多个同类包裹，已停止继续动作')
+                valid=[t for t in scene['targets'] if t.get('valid') and t['name']==previous['name']]
+                near=[t for t in valid if np.linalg.norm(np.array(t['xyz_m'])-previous['xyz_m'])<.12]
+                if len(near)>1:near=sorted(near,key=lambda t:np.linalg.norm(np.array(t['xyz_m'])-previous['xyz_m']))
                 return near[0] if near else None
             def plan(self,scene,target,action):return call('plan',{'scene_id':scene['scene_id'],'target_id':target['id'],'action':action},timeout=90)
             def execute(self,plan):
                 for point in plan['paths']:move(point['joints'])
             def scan(self):return call('label',timeout=15)
+            def retreat(self):
+                goal=proposal['initial_joints'];call('validate',{'from':state()['joints'],'to':goal},timeout=60);move(goal)
             def act_flip(self,target):
+                flip=flips.get(target['name'])
+                if not flip:raise PackageError('该类别没有登记翻面技能')
+                from .geometry import inside
+                if not inside(target['xyz_m'],flip['training_bounds']):raise PackageError('包裹不在翻面技能训练区域内')
                 if loaded[0]!=flip['checkpoint']:
                     inference.call('act-load',{'path':flip['checkpoint'],'device':settings['device']},timeout=120);loaded[0]=flip['checkpoint']
                 goal=flip['start_pose_rad'];call('validate',{'from':state()['joints'],'to':goal},timeout=60);move(goal);run_act(flip)
@@ -109,8 +113,9 @@ def main():
                 near=[t for t in fresh['targets'] if t.get('valid') and t['name']==target['name'] and np.linalg.norm(np.array(t['xyz_m'])-target['xyz_m'])<float(cfg.get('left_push_m',settings['safety']['max_push_m']))+.1]
                 if len(near)>1:raise SortingError('推拢后出现多个同类包裹，已停止')
                 return near[0] if near else None
-        result=run_cycle(IO(),cfg)
+        result=run_session(IO(),cfg,int(cfg.get('max_packages',50)))
         print('[分拣结果] '+json.dumps(result,ensure_ascii=False),flush=True)
+        if result['stopped_because']!='cleared':raise SortingError('桌面未能清空：'+str(result['stopped_because'])+'；失败 '+str(len(result['failed']))+' 个')
     try:
         if proposal.get('mode')=='cycle':
             phase('RECHECK_RGBD');call('init',timeout=90);cycle_mode();return
