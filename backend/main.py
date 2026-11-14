@@ -4250,7 +4250,27 @@ def api_datasets():
 
 @app.post("/api/record/start")
 def api_record_start():
-    return start_job("record", "数据采集", load_config())
+    cfg = load_config()
+    # 开始前按所选分辨率同时打开全部相机试读一帧，带宽不足时直接给出明确原因，而不是等任务超时
+    leases, problems = [], []
+    try:
+        for cam in cfg.get("cameras") or []:
+            try:
+                leases.append((cam, camera_probe(cam.get("index_or_path", 0))))
+            except ApiError as exc:
+                problems.append(f"{cam.get('name')}（{cam.get('width')}×{cam.get('height')}）：{exc.detail}")
+        for cam, lease in leases:
+            try:
+                lease.read()
+            except Exception as exc:  # noqa: BLE001
+                problems.append(f"{cam.get('name')}（{cam.get('width')}×{cam.get('height')}@{cam.get('fps')}）：{_brief(exc)}")
+    finally:
+        for _, lease in leases:
+            lease.release()
+    if problems:
+        raise ApiError("按当前相机分辨率无法同时取流，已取消采集：\n" + "\n".join(problems) +
+                       "\n请在摄像头页降低分辨率/帧率，或把相机分散到不同 USB 接口后重试", 409)
+    return start_job("record", "数据采集", cfg)
 
 
 def _port_in_use(port: int) -> bool:
