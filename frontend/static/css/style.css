@@ -875,8 +875,8 @@ button, .btn { border-radius: 8px; min-height: 38px; }
 .camera-tile header { display: flex; align-items: center; gap: 12px; justify-content: space-between; padding: 16px 18px; }
 .camera-tile h3 { font-size: 15px; }
 .camera-source { margin-top: 2px; color: var(--text-3); font-size: 12px; overflow-wrap: anywhere; }
-.camera-preview { aspect-ratio: 4 / 3; position: relative; background: #111827; display: grid; place-items: center; }
-.camera-preview img { width: 100%; height: 100%; object-fit: contain; position: absolute; inset: 0; }
+.camera-preview { aspect-ratio: 4 / 3; position: relative; background: #111827; display: grid; place-items: center; overflow: hidden; }
+.camera-preview img, .camera-preview canvas { width: 100%; height: 100%; object-fit: fill; position: absolute; inset: 0; display: block; }
 .camera-placeholder { color: #c4cfdf; text-align: center; max-width: 90%; padding: 24px; z-index: 1; }
 .camera-placeholder p { margin: 0 0 14px; font-size: 13px; }
 .camera-tile footer { padding: 14px 18px 16px; }
@@ -1121,8 +1121,8 @@ button, .btn { border-radius: 8px; min-height: 38px; }
 .monitor-preview-panel header p { margin:3px 0 0;font-size:12px;color:var(--text-3); }
 .monitor-preview-close { flex:0 0 34px;display:grid;place-content:center;width:34px;height:34px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);font-size:24px;line-height:1;font-family:inherit;cursor:pointer; }
 .monitor-preview-close:hover { background:var(--bg); }
-.monitor-preview-view { position:relative;height:min(70dvh,780px);background:#111b27; }
-.monitor-preview-view canvas { display:block;width:100%;height:100%;object-fit:contain;touch-action:none; }
+.monitor-preview-view { position:relative;height:min(70dvh,780px);background:#111b27;overflow:hidden; }
+.monitor-preview-view canvas { display:block;width:100%;height:100%;object-fit:fill;touch-action:none; }
 .monitor-preview-view canvas[hidden] { display:none; }
 .monitor-preview-view #monitorArmScene { background:var(--bg);cursor:grab; }
 .monitor-preview-panel>footer { padding:11px 20px;font-size:12px;line-height:1.6;color:var(--text-3); }

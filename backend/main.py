@@ -231,6 +231,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
              "repo_id": "seeed/eval_test123",
              "single_task": "Put lego brick into the transparent box",
              "num_episodes": 1, "episode_time_s": 30, "reset_time_s": 10,
+             "continuous_sort": False, "idle_stop_s": 8, "max_sort_time_s": 600,
              "auto_home": True},
     "viz": {"repo_id": "seeed_rebot_b601_dm/test", "episode_index": 0,
             "display_compressed_images": False},
@@ -2134,19 +2135,30 @@ def build_command(kind: str, cfg: dict, extra: Optional[dict] = None) -> list[st
         return _lerobot("lerobot-train") + [
             f"--config_path={e.get('config_path') or tr.get('resume_config')}", "--resume=true"]
     if kind == "eval":
-        # 必须显式给剧集数/时长，否则 LeRobot 用默认 50 集 × 60s + 60s 复位，
-        # 评估看起来"永远不结束"。
-        record_base = _lerobot("lerobot-record") if bool(ev.get("auto_home", True)) \
-            else _safe_record()
+        # 支持两种模式：
+        # 1) 持续分拣模式（continuous_sort=True）：不按 30s 截断，连续分拣直到全部快递弄完（机械臂静止满 idle_stop_s 秒自动停机）；
+        # 2) 固定剧集评估模式（continuous_sort=False）：按设定的 num_episodes × episode_time_s 执行。
+        continuous = bool(ev.get("continuous_sort", False))
+        if continuous:
+            record_base = _safe_record()
+            num_ep = 1
+            ep_time = max(30, int(ev.get("max_sort_time_s") or 600))
+            rst_time = 0
+        else:
+            record_base = _lerobot("lerobot-record") if bool(ev.get("auto_home", True)) \
+                else _safe_record()
+            num_ep = int(ev.get("num_episodes") or 1)
+            ep_time = int(ev.get("episode_time_s") or 30)
+            rst_time = int(ev.get("reset_time_s") or 10)
         eval_cfg = dict(cfg)
         eval_cfg["cameras"] = eval_policy_cameras(cfg, str(ev.get("policy_path") or ""))
         return record_base + robot_base_args(
             eval_cfg, with_cameras=True, with_teleop=False, display=False) + [
                 f"--dataset.repo_id={ev['repo_id']}",
                 f"--dataset.single_task={ev['single_task']}",
-                f"--dataset.num_episodes={int(ev.get('num_episodes') or 1)}",
-                f"--dataset.episode_time_s={ev.get('episode_time_s') or 30}",
-                f"--dataset.reset_time_s={ev.get('reset_time_s') or 10}",
+                f"--dataset.num_episodes={num_ep}",
+                f"--dataset.episode_time_s={ep_time}",
+                f"--dataset.reset_time_s={rst_time}",
                 "--dataset.push_to_hub=false",
                 f"--policy.path={ev['policy_path']}"]
     if kind == "policy-server":
@@ -2523,9 +2535,16 @@ def _spawn(kind: str, name: str, cmd: list[str], display: Optional[str] = None,
         HUB.state(running=True, job=name, command=shown, kind=kind)
         if kind in CAMERA_JOB_KINDS and kind != 'find-cameras':
             env_extra = dict(env_extra or {})
+            cfg_now = load_config()
             env_extra['REBOT_CAMERA_BROKER_URL'] = os.environ.get('REBOT_CAMERA_BROKER_URL', f'http://127.0.0.1:{PORT}')
-            env_extra.update(TELEMETRY.environment(monitor_ports(load_config())))
+            env_extra.update(TELEMETRY.environment(monitor_ports(cfg_now)))
             env_extra['PYTHONPATH'] = str(BACKEND_DIR)+os.pathsep+os.environ.get('PYTHONPATH','')
+            if kind == 'eval':
+                ev_cfg = cfg_now.get('eval') or {}
+                env_extra['REBOT_KEEP_POSE'] = '0' if bool(ev_cfg.get('auto_home', True)) else '1'
+                env_extra['REBOT_CONTINUOUS_SORT'] = '1' if bool(ev_cfg.get('continuous_sort', False)) else '0'
+                idle_s = ev_cfg.get('idle_stop_s')
+                env_extra['REBOT_IDLE_STOP_S'] = str(8 if idle_s in (None, '') else max(0, float(idle_s)))
         job = Job(name=name, kind=kind, command=cmd, display=shown, stdin_data=stdin_data)
         job.step_label = name
         try:

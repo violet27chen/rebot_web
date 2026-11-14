@@ -205,11 +205,28 @@
   }, 1200);
   window.addEventListener("pagehide", function () { clearInterval(waybillTimer); });
 
+  function syncEvalModeUI() {
+    var chk = A.el("chkContinuousSort");
+    var contRow = A.el("continuousSortRow");
+    var fixedRow = A.el("fixedEpisodeRow");
+    var btn = A.el("btnEval");
+    var isCont = chk ? chk.checked : false;
+    if (contRow) contRow.style.opacity = isCont ? "1" : "0.5";
+    if (fixedRow) fixedRow.style.opacity = isCont ? "0.55" : "1";
+    if (btn) btn.textContent = isCont ? "开始持续分拣" : "开始评估";
+  }
+
+  if (A.el("chkContinuousSort")) {
+    A.el("chkContinuousSort").addEventListener("change", syncEvalModeUI);
+  }
+
   async function loadConfig() {
     try {
       var c = await A.api.get("/api/config");
       populateWaybillCameras(c.cameras || []);
-      A.fillForm(A.el("evalForm"), c.eval || {});
+      var evCfg = Object.assign({ continuous_sort: true, idle_stop_s: 8, max_sort_time_s: 600 }, c.eval || {});
+      A.fillForm(A.el("evalForm"), evCfg);
+      syncEvalModeUI();
       var repo = A.q('#evalForm [name="repo_id"]');
       if (repo && !repo.value.trim()) repo.value = evalRepoDefault();
       await loadCkptOptions(A.q('#evalForm [name="policy_path"]'),

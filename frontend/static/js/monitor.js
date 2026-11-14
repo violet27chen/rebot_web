@@ -10,7 +10,7 @@
   function start(record){
     if(paused||record.disabled)return;record.open=true;clearTimeout(record.timer);record.note.textContent='正在连接…';record.box.dataset.live='false';
     record.img.onerror=function(){if(paused)return;record.open=false;record.box.dataset.live='false';record.note.textContent='离线 · 正在重连';record.attempts=(record.attempts||0)+1;record.timer=setTimeout(function(){start(record);},Math.min(30000,1000*Math.pow(2,Math.min(record.attempts,5))));};
-    record.img.onload=function(){if(!record.open)return;record.attempts=0;record.box.dataset.live='true';record.note.textContent='实时画面';};
+    record.img.onload=function(){if(!record.open)return;record.attempts=0;record.box.dataset.live='true';record.note.textContent='实时画面';var mImg=record.box.querySelector('.monitor-image');if(mImg&&record.img.naturalWidth&&record.img.naturalHeight)mImg.style.aspectRatio=record.img.naturalWidth+' / '+record.img.naturalHeight;};
     record.img.src=record.url+'&t='+Date.now();
     record.timer=setTimeout(function(){if(record.open&&!record.img.naturalWidth&&!paused)record.img.onerror();},12000);
   }
@@ -26,6 +26,7 @@
     dialog.addEventListener('click',function(e){if(e.target===dialog)dialog.close();});
     dialog.addEventListener('close',function(){
       cancelAnimationFrame(preview.frame);
+      var vBox=A.el('monitorPreviewView');if(vBox){vBox.style.aspectRatio='';vBox.style.height='';vBox.style.maxHeight='';}
       if(preview.kind==='model'&&preview.home){var canvas=A.el('monitorArmScene');preview.home.insertBefore(canvas,preview.placeholder);preview.placeholder.remove();if(world)world.resize();}
       preview.kind=preview.record=preview.home=preview.placeholder=null;A.el('monitorPreviewImage').hidden=false;
       if(preview.returnFocus&&preview.returnFocus.isConnected)preview.returnFocus.focus({preventScroll:true});
@@ -49,7 +50,7 @@
       if(!preview.dialog.open||preview.record!==record)return;
       var valid=!paused&&record.box.dataset.live==='true'&&record.img.naturalWidth;
       empty.hidden=!!valid;empty.textContent=paused?'设备已断开':record.note.textContent;
-      if(valid){if(canvas.width!==record.img.naturalWidth||canvas.height!==record.img.naturalHeight){canvas.width=record.img.naturalWidth;canvas.height=record.img.naturalHeight;}context.drawImage(record.img,0,0);}
+      if(valid){if(canvas.width!==record.img.naturalWidth||canvas.height!==record.img.naturalHeight){canvas.width=record.img.naturalWidth;canvas.height=record.img.naturalHeight;}var vBox=A.el('monitorPreviewView');if(vBox&&record.img.naturalHeight){vBox.style.aspectRatio=record.img.naturalWidth+' / '+record.img.naturalHeight;vBox.style.height='auto';vBox.style.maxHeight='min(72dvh, 780px)';}context.drawImage(record.img,0,0,canvas.width,canvas.height);}
       else context.clearRect(0,0,canvas.width,canvas.height);
       preview.frame=requestAnimationFrame(paint);
     }paint();
@@ -136,8 +137,8 @@
     if(!geometryBinding)applyGeometry(next);else layoutWorld(readGeometry().monitor_layout);
     var wanted=new Set(),grid=A.el('monitorFeeds');
     (next.cameras||[]).forEach(function(c){var id=canonical(c.index_or_path);wanted.add(id);var signature=JSON.stringify([c.index_or_path,c.width,c.height,c.fps,c.fourcc]),record=streams.get(id);
-      if(!record){record=tile(id,c.name,id,'/api/camera/stream?device='+encodeURIComponent(c.index_or_path));streams.set(id,record);grid.appendChild(record.box);record.signature=signature;start(record);}
-      else{record.title=c.name;record.box.querySelector('strong').textContent=c.name;if(record.signature!==signature){record.signature=signature;record.url='/api/camera/stream?device='+encodeURIComponent(c.index_or_path);stop(record);start(record);}}
+      if(!record){record=tile(id,c.name,id,'/api/camera/stream?device='+encodeURIComponent(c.index_or_path));streams.set(id,record);grid.appendChild(record.box);record.signature=signature;var mImg0=record.box.querySelector('.monitor-image');if(mImg0&&c.width&&c.height)mImg0.style.aspectRatio=Number(c.width)+' / '+Number(c.height);start(record);}
+      else{record.title=c.name;record.box.querySelector('strong').textContent=c.name;var mImg1=record.box.querySelector('.monitor-image');if(mImg1&&c.width&&c.height)mImg1.style.aspectRatio=Number(c.width)+' / '+Number(c.height);if(record.signature!==signature){record.signature=signature;record.url='/api/camera/stream?device='+encodeURIComponent(c.index_or_path);stop(record);start(record);}}
     });
     wanted.add('@depth');streams.forEach(function(record,id){if(!wanted.has(id)){if(preview.record===record)preview.dialog.close();stop(record);record.box.remove();streams.delete(id);}});
     if(!streams.has('@depth')){var d=tile('@depth','深度相机 · Depth','@depth','/api/depth/stream?view=color');streams.set('@depth',d);grid.appendChild(d.box);start(d);}
@@ -170,7 +171,7 @@
         validate:function(){if(!A.el('monitorGeometryForm').checkValidity())throw new Error('请填写有效坐标或正数间距');},
         write:async function(delta){await A.saveConfig(delta);A.el('monitorGeometryState').textContent='位置设置已自动保存。';}});
     }catch(error){A.el('monitorConnection').textContent=error.message;}
-    function readyImages(){streams.forEach(function(r){if(r.open&&r.img.naturalWidth&&r.img.currentSrc===r.img.src&&r.box.dataset.live!=='true'){r.box.dataset.live='true';r.note.textContent='实时画面';r.attempts=0;}});requestAnimationFrame(readyImages);}readyImages();A.autosave.onConfig(configure);connect();
+    function readyImages(){streams.forEach(function(r){if(r.open&&r.img.naturalWidth&&r.img.currentSrc===r.img.src&&r.box.dataset.live!=='true'){r.box.dataset.live='true';r.note.textContent='实时画面';r.attempts=0;var mImg=r.box.querySelector('.monitor-image');if(mImg&&r.img.naturalHeight)mImg.style.aspectRatio=r.img.naturalWidth+' / '+r.img.naturalHeight;}});requestAnimationFrame(readyImages);}readyImages();A.autosave.onConfig(configure);connect();
   }
   window.MONITOR={mount:mount,getImage:image,paused:function(){return paused;},pause:setPaused,startSource:function(source){var r=streams.get(canonical(source));if(r){r.disabled=false;start(r);}},stopSource:function(source){var r=streams.get(canonical(source));if(r){r.disabled=true;stop(r);}}};
 })();

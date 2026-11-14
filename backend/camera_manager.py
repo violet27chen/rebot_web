@@ -216,6 +216,17 @@ class CameraManager:
             if self.exclusive:
                 raise CameraError('相机已交给采集 / 遥操作 / 评估任务；任务结束后可重新预览')
             session = self.sessions.get(key)
+            if session and not session.stop.is_set() and session.thread.is_alive() and config:
+                def _prof(cfg):
+                    return (
+                        int(cfg.get('width') or 640),
+                        int(cfg.get('height') or 480),
+                        int(cfg.get('fps') or 30),
+                        str(cfg.get('fourcc') or 'MJPG').upper(),
+                    )
+                if _prof(session.config) != _prof(config):
+                    self.close_devices([key])
+                    session = None
             if session and session.stop.is_set() and session.thread.is_alive():
                 raise CameraError(f'{key} 正在释放，请稍后重试')
             if session is None or not session.thread.is_alive():

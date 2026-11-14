@@ -65,10 +65,28 @@
         <div class="field"><label>策略模型路径</label><select name="policy_path"></select></div>
         <div class="field" style="margin-top:10px"><label>评估数据集 repo_id</label><input name="repo_id"></div>
         <div class="field" style="margin-top:10px"><label>任务描述</label><input name="single_task"></div>
-        <div class="row" style="margin-top:10px">
-          <div class="field narrow"><label>剧集数</label><input name="num_episodes" type="number" value="1"></div>
-          <div class="field narrow"><label>单集时长 (s)</label><input name="episode_time_s" type="number" value="30"></div>
-          <div class="field narrow"><label>重置时长 (s)</label><input name="reset_time_s" type="number" value="10"></div>
+        <div style="margin-top:12px;padding:12px 14px;border:1.5px solid var(--primary,#2563eb);border-radius:10px;background:var(--bg-subtle,rgba(37,99,235,0.05))">
+          <label class="check" style="font-weight:600;color:var(--primary,#1d4ed8)">
+            <input type="checkbox" name="continuous_sort" id="chkContinuousSort" checked>
+            持续分拣模式（不按单集 30s 截断，连续分拣直到桌面所有快递弄完自动停机）
+          </label>
+          <div class="row" id="continuousSortRow" style="margin-top:10px">
+            <div class="field">
+              <label>桌面清空/静止自动停机 (s)</label>
+              <input name="idle_stop_s" type="number" min="0" max="300" value="8">
+              <span class="hint">机械臂回待机位连续静止满该秒数即判定全部快递已弄完（填 0 则仅手动停止）</span>
+            </div>
+            <div class="field">
+              <label>单次最长安全时限 (s)</label>
+              <input name="max_sort_time_s" type="number" min="30" max="7200" value="600">
+              <span class="hint">持续分拣的总安全时长上限（默认 600s = 10 分钟）</span>
+            </div>
+          </div>
+        </div>
+        <div class="row" id="fixedEpisodeRow" style="margin-top:10px">
+          <div class="field narrow"><label>固定模式 · 剧集数</label><input name="num_episodes" type="number" value="1"></div>
+          <div class="field narrow"><label>固定模式 · 单集时长 (s)</label><input name="episode_time_s" type="number" value="30"></div>
+          <div class="field narrow"><label>固定模式 · 重置时长 (s)</label><input name="reset_time_s" type="number" value="10"></div>
         </div>
         <label class="check" style="margin-top:12px">
           <input type="checkbox" name="auto_home" checked> 结束时自动回零并卸力（建议；确认回零路径上没有设备）
@@ -77,12 +95,14 @@
           <button class="btn subtle" type="submit">保存参数</button>
           <button class="btn subtle" type="button" id="btnReloadCkpt">刷新检查点</button>
           <button class="btn subtle" type="button" id="btnNewEvalName">生成数据集名</button>
-          <button class="btn primary" type="button" id="btnEval">开始评估</button>
+          <button class="btn primary" type="button" id="btnEval">开始持续分拣 / 评估</button>
           <button class="btn danger" type="button" id="btnEvalStop">急停</button>
           <button class="btn" type="button" id="btnEvalHomeDisable">一键收工归零并失能</button>
         </div>
         <div class="note" style="margin-top:12px">
-          需要先连接主从臂与相机；检查点从「模型产出」里选。评估运行期间上方会自动轮询相机画面识别快递面单条码/二维码。
+          <strong>如何让模型把所有快递一直弄完并自动停下：</strong><br>
+          1. 勾选上方<strong>「持续分拣模式」</strong>：系统不再受单集 30 秒限制，会连续运行策略一个接一个处理快递；<br>
+          2. <strong>采集与训练配合技巧</strong>：采集每集分拣完包裹后，让双臂回到固定的<strong>初始待机位</strong>停住 2~3 秒；并建议额外补录 3~5 集「空桌面保持待机位不动（5~10s）」的数据。这样模型看到有快递就继续分拣，看到桌面全部弄完就会稳稳停在待机位，触发上方「连续静止 8s 自动停机并回零」。
         </div>
       </form>
     </div>
@@ -93,8 +113,8 @@
       <div class="log" id="logPanel"></div>
     </div>
   </div>
-  <script src="/static/js/common.js?v=3.5.4-20261114-20-r3"></script>
-  <script src="/static/js/autosave.js?v=3.5.4-20261114-20-r3"></script>
-  <script src="/static/js/eval.js?v=3.5.4-20261114-20-r3"></script>
+  <script src="/static/js/common.js?v=3.5.4-20261114-22"></script>
+  <script src="/static/js/autosave.js?v=3.5.4-20261114-22"></script>
+  <script src="/static/js/eval.js?v=3.5.4-20261114-22"></script>
 </body>
 </html>

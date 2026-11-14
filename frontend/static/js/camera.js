@@ -63,15 +63,16 @@
     if (pending.has(c._id)) return;
     stop(c,!!retry); desired.add(c._id); var t = tile(c._id); if (!t) return;
     running.add(c._id); state();
-    var img = t.querySelector('img'), placeholder = t.querySelector('.camera-placeholder');
+    var img = t.querySelector('img'), placeholder = t.querySelector('.camera-placeholder'), previewBox = t.querySelector('.camera-preview');
+    if (previewBox && c.width && c.height) previewBox.style.aspectRatio = Number(c.width) + ' / ' + Number(c.height);
     t.querySelector('[data-state]').textContent = '连接中';
     placeholder.querySelector('p').textContent = '正在等待首帧…';
     t.querySelector('[data-toggle]').textContent = '暂停预览';
     if(shared){
-      img.hidden=true;var canvas=t.querySelector('canvas');if(!canvas){canvas=document.createElement('canvas');canvas.style.cssText='width:100%;height:100%;object-fit:contain';img.after(canvas);}canvas.hidden=false;
+      img.hidden=true;var canvas=t.querySelector('canvas');if(!canvas){canvas=document.createElement('canvas');canvas.style.cssText='position:absolute;inset:0;display:block;width:100%;height:100%;object-fit:fill';img.after(canvas);}canvas.hidden=false;
       function draw(){if(!running.has(c._id))return;var source=shared.getImage(c.index_or_path);
         if(shared.paused()){placeholder.hidden=false;placeholder.querySelector('p').textContent='设备已断开，可在常驻监视区恢复';}
-        else if(source&&source.naturalWidth&&source.getAttribute('src')){if(canvas.width!==source.naturalWidth){canvas.width=source.naturalWidth;canvas.height=source.naturalHeight;}canvas.getContext('2d').drawImage(source,0,0);placeholder.hidden=true;t.querySelector('[data-state]').textContent='共享实时画面';t.querySelector('[data-state]').className='badge ok';}
+        else if(source&&source.naturalWidth&&source.naturalHeight&&source.getAttribute('src')){if(canvas.width!==source.naturalWidth||canvas.height!==source.naturalHeight){canvas.width=source.naturalWidth;canvas.height=source.naturalHeight;}if(previewBox)previewBox.style.aspectRatio=source.naturalWidth+' / '+source.naturalHeight;canvas.getContext('2d').drawImage(source,0,0,canvas.width,canvas.height);placeholder.hidden=true;t.querySelector('[data-state]').textContent='共享实时画面';t.querySelector('[data-state]').className='badge ok';}
         mirrorFrames.set(c._id,requestAnimationFrame(draw));
       }draw();return;
     }
@@ -79,6 +80,7 @@
     img.onload = function () {
       if (!running.has(c._id)) return;
       clearTimeout(streamTimers.get(c._id)); placeholder.hidden = true; retries.delete(c._id);
+      if (previewBox && img.naturalWidth && img.naturalHeight) previewBox.style.aspectRatio = img.naturalWidth + ' / ' + img.naturalHeight;
       t.querySelector('[data-state]').textContent = '实时画面'; t.querySelector('[data-state]').className = 'badge ok';
     };
     img.onerror = function () { failed(c); };
@@ -102,10 +104,10 @@
     grid.querySelectorAll('img').forEach(function (img) { img.onload = img.onerror = null; img.removeAttribute('src'); });
     streamTimers.forEach(clearTimeout); streamTimers.clear();
     grid.innerHTML = cameras.map(function (c, index) {
-      var isPending = pending.has(c._id), sdk = false;
+      var isPending = pending.has(c._id), sdk = false, ar = (Number(c.width) || 640) + ' / ' + (Number(c.height) || 480);
       return '<article class="camera-tile" data-camera="' + c._id + '"><header><div><h3>' + A.esc(c.name) +
         '</h3><div class="camera-source">第 ' + (index + 1) + ' 路 · ' + A.esc(sourceLabel(c)) + '</div></div><span class="badge" data-state>未连接</span></header>' +
-        '<div class="camera-preview"><img hidden alt="' + A.esc(c.name) + ' 实时画面"><div class="camera-placeholder"><p>' +
+        '<div class="camera-preview" style="aspect-ratio:' + ar + '"><img hidden alt="' + A.esc(c.name) + ' 实时画面"><div class="camera-placeholder"><p>' +
         (isPending ? '保存配置后即可预览' : sdk ? 'SDK 相机请使用下方高级诊断' : '预览已暂停') + '</p></div></div><footer>' +
         '<div class="camera-meta">' + A.esc(c.width) + ' × ' + A.esc(c.height) + ' · 采集 ' + A.esc(c.fps) + ' FPS · ' + A.esc(c.fourcc || 'MJPG') + '</div>' +
         '<div class="camera-res"><label>分辨率 <select data-res aria-label="修改 ' + A.esc(c.name) + ' 分辨率">' + resOptions(c.width, c.height) + '</select></label></div>' +
@@ -233,7 +235,7 @@
   function refreshCards(){
     var current=Array.from(grid.querySelectorAll('[data-camera]')).map(function(n){return Number(n.dataset.camera);});
     if(JSON.stringify(current)!==JSON.stringify(cameras.map(function(c){return c._id;}))){render();return;}
-    cameras.forEach(function(c){var t=tile(c._id);t.querySelector('[data-toggle]').disabled=pending.has(c._id);t.querySelector('[data-snapshot]').disabled=pending.has(c._id);t.querySelector('h3').textContent=c.name;t.querySelector('.camera-source').textContent=sourceLabel(c);t.querySelector('.camera-meta').textContent=c.width+' × '+c.height+' · 采集 '+c.fps+' FPS · '+(c.fourcc||'MJPG');var rs=t.querySelector('[data-res]');if(rs)rs.innerHTML=resOptions(c.width,c.height);});
+    cameras.forEach(function(c){var t=tile(c._id);var pv=t.querySelector('.camera-preview');if(pv&&c.width&&c.height)pv.style.aspectRatio=Number(c.width)+' / '+Number(c.height);t.querySelector('[data-toggle]').disabled=pending.has(c._id);t.querySelector('[data-snapshot]').disabled=pending.has(c._id);t.querySelector('h3').textContent=c.name;t.querySelector('.camera-source').textContent=sourceLabel(c);t.querySelector('.camera-meta').textContent=c.width+' × '+c.height+' · 采集 '+c.fps+' FPS · '+(c.fourcc||'MJPG');var rs=t.querySelector('[data-res]');if(rs)rs.innerHTML=resOptions(c.width,c.height);});
   }
   function applyCameraConfig(cfg){
     var next=cfg.cameras||[], previous=cameras.slice(), restart=[];
