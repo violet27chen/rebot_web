@@ -40,8 +40,8 @@ def inspect_skill(entry,root,calibration_id):
     return dict(entry,checkpoint=str(path),state_names=state_names,action_names=action_names,visual=visual)
 
 
-def route(target,skills):
-    matches=[entry for entry in skills if entry.get('class_name')==target.get('name') and entry.get('enabled',True)]
+def route(target,skills,role='act'):
+    matches=[entry for entry in skills if entry.get('class_name')==target.get('name') and entry.get('enabled',True) and entry.get('role','act')==role]
     if len(matches)!=1:raise SortingError('检测类别需要唯一的 ACT 技能映射；未匹配或重复时不会选择任意模型')
     return matches[0]
 

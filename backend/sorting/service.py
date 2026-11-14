@@ -12,6 +12,7 @@ import cv2
 import numpy as np
 from .geometry import SortingError,camera,unproject,align_fit,rigid_fit,validate_calibration,locate,fingerprint,transform,apply,inside,bounds,array
 from .skills import route,inspect_skill,NAMES
+from .pushleft import push_left_poses,gripper_down_ok,left_direction
 from .ipc import Worker
 
 DEFAULTS={'camera_source':'','yolo_model':'','device':'cuda','confidence':.6,'control_python':'',
@@ -207,7 +208,8 @@ class SortingService:
             if not self.kin or not self.kin.alive():self.kin=Worker(self.control_python(),'backend.sorting.kinematics_worker',self.h.root)
             return self.kin.call(method,payload,timeout=30)
 
-    def plan(self,scene_id,target_id):
+    def plan(self,scene_id,target_id,action=None):
+        if action in ('inspect','push_left','cycle'):return self._plan_cycle(scene_id,target_id,action)
         s=self.settings();scene=self.scenes.get(scene_id)
         if not scene or time.time()-scene['timestamp']>20 or scene['fingerprint']!=fingerprint(s):raise SortingError('检测结果已过期或配置变化，请重新检测')
         target=next((t for t in scene['targets'] if t['id']==str(target_id) and t.get('valid')),None)
@@ -259,6 +261,56 @@ class SortingService:
         with self.lock:ident=self.remember(self.plans,plan,4)
         return {'plan_id':ident,'push':is_push,'paths':paths,'target':target,'skill':entry['name'],'expires_in':60}
 
+    def _pick_arm(self,package,c,cyc):
+        if cyc.get('arm') in ('left','right'):return cyc['arm']
+        best=None
+        for side in ('left','right'):
+            base=np.linalg.inv(transform(c['arms'][side]['base_from_workspace']))[:3,3]
+            d=float(np.linalg.norm((np.asarray(package)-base)[:2]))
+            if best is None or d<best[0]:best=(d,side)
+        return best[1]
+
+    def _plan_cycle(self,scene_id,target_id,action):
+        """悬停看面单（inspect）、向左推走（push_left）、整套流程预演（cycle）。不执行任何运动。"""
+        s=self.settings();scene=self.scenes.get(scene_id)
+        if not scene or time.time()-scene['timestamp']>20 or scene['fingerprint']!=fingerprint(s):raise SortingError('检测结果已过期或配置变化，请重新检测')
+        target=next((t for t in scene['targets'] if t['id']==str(target_id) and t.get('valid')),None)
+        if not target:raise SortingError('请选择有有效深度的目标')
+        c=s['calibration'];self.check_camera(s);validate_calibration(c,('left','right'))
+        cyc=s.get('cycle') or {};q=array(self.h.measured(),(14,),'双臂实测角度')
+        limits=array(s['safety'].get('joint_limits_rad'),(14,2),'原始电机关节限位（弧度）')
+        torque=array(s['safety'].get('torque_limits_nm'),(14,),'电机安全力矩上限（Nm）')
+        if np.any(torque<=0):raise SortingError('每个电机安全力矩上限必须为正数')
+        if np.any(limits[:,0]>=limits[:,1]) or np.any(q<limits[:,0]) or np.any(q>limits[:,1]):raise SortingError('实测姿态或配置关节限位无效')
+        clearance=float(s['safety']['clearance_m'])
+        if not .05<=clearance<=.3:raise SortingError('预接近净空应在 0.05～0.3 米')
+        package=np.asarray(target['xyz_m']);primary=self._pick_arm(package,c,cyc);other='right' if primary=='left' else 'left'
+        rpys={side:array((cyc.get('approach_rpy') or {}).get(side),(3,),side+' 标定接近姿态') for side in ('left','right')}
+        for side in ('left','right'):
+            if not gripper_down_ok(rpys[side],cyc.get('tool_axis',[0,0,1]),c['arms'][side]['base_from_workspace'],float(cyc.get('max_tilt_rad',.35))):
+                raise SortingError(side+' 接近姿态没有让爪头朝下，已拒绝（检查 approach_rpy 与 tool_axis）')
+        if action=='push_left':
+            travel=float(cyc.get('left_push_m',s['safety']['max_push_m']))
+            poses=push_left_poses(package,target['extent_m'],target['height_m'],cyc.get('left_direction'),travel,clearance,primary,other)
+        else:poses=[(primary,package+np.array([0,0,clearance]))]
+        paths=[];current=q.copy()
+        for side,xyz in poses:
+            if not inside(xyz,c['workspace_bounds']):raise SortingError('规划点超出已标定工作区')
+            base=apply(transform(c['arms'][side]['base_from_workspace']),[xyz])[0];index=0 if side=='left' else 7
+            ik=self.kinematics('ik',{'joints':current[index:index+6].tolist(),'xyz':base.tolist(),'rpy':rpys[side].tolist(),'check_rot':True})
+            next_q=current.copy();next_q[index:index+6]=ik['joints']
+            if np.any(next_q<limits[:,0]) or np.any(next_q>limits[:,1]):raise SortingError('IK 结果超过已确认的电机关节限位')
+            self.kinematics('validate-path',{'from':current.tolist(),'to':next_q.tolist(),'calibration':c})
+            paths.append({'joints':next_q.tolist(),'side':side,'xyz_workspace':np.asarray(xyz).tolist()});current=next_q
+        plan={'target':target,'paths':paths,'push':False,'action':action,'initial_joints':q.tolist(),
+              'fingerprint':fingerprint(s),'created':time.monotonic(),'scene_id':scene_id}
+        if action=='cycle':
+            flip=inspect_skill(route(target,s['skills'],'flip'),self.h.root,fingerprint(c))
+            if not inside(package,flip['training_bounds']):raise SortingError('包裹不在翻面技能的训练区域内，请先摆放到该区域')
+            plan.update(mode='cycle',flip_skill=flip,cycle=cyc,skill=flip)
+        with self.lock:ident=self.remember(self.plans,plan,4)
+        return {'plan_id':ident,'action':action,'paths':paths,'target':target,'expires_in':60}
+
     def close(self):
         for worker in (self.detector,self.kin,self.control):
             if worker:worker.close()
@@ -280,6 +332,14 @@ def validate_settings(value):
         for r in rules:
             try:re.compile(r['pattern'])
             except re.error:raise SortingError('单号规则正则无效：'+r['pattern'])
+    if 'cycle' in value:
+        cyc=value['cycle']
+        if not isinstance(cyc,dict):raise SortingError('cycle 配置需要对象')
+        if cyc.get('left_direction') is not None:left_direction(cyc['left_direction'])
+        if cyc.get('arm') not in (None,'','auto','left','right'):raise SortingError('cycle.arm 只能是 auto/left/right')
+        if cyc.get('left_push_m') is not None and not .005<=float(cyc['left_push_m'])<=.2:raise SortingError('left_push_m 应在 0.005～0.2 米')
+        if cyc.get('min_left_push_m') is not None and not .01<=float(cyc['min_left_push_m'])<=.5:raise SortingError('min_left_push_m 应在 0.01～0.5 米')
+        if cyc.get('max_flips') is not None and not 0<=int(cyc['max_flips'])<=4:raise SortingError('max_flips 应在 0～4')
     if 'label_camera' in value and not isinstance(value['label_camera'],str):raise SortingError('label_camera 需要字符串')
     safe=value.get('safety') or {}
     for name,low,high in [('max_velocity_rad_s',.001,.5),('max_delta_rad',.001,.3),('clearance_m',.05,.3),('max_push_m',.005,.2)]:

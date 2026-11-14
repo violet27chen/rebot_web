@@ -28,6 +28,10 @@ def main():
                 target=pin.SE3(pin.rpy.rpyToMatrix(*p['rpy']),np.asarray(p['xyz']))
                 result=solve_ik(model,model.createData(),frame,target,pad(p['joints']),IKParams(),controlled_joints=6)
                 if not result.success or np.linalg.norm(fk(result.q[:6])-p['xyz'])>.005:raise SortingError('官方 DM 模型 IK/回算未达到目标精度')
+                if p.get('check_rot'):
+                    pin.forwardKinematics(model,data,pad(result.q[:6]));pin.updateFramePlacements(model,data)
+                    Rt=pin.rpy.rpyToMatrix(*p['rpy']);Ra=data.oMf[frame].rotation
+                    if np.arccos(np.clip((np.trace(Ra.T@Rt)-1)/2,-1,1))>float(p.get('max_rot_rad',.1)):raise SortingError('IK 解未达到要求的爪头朝向')
                 value={'joints':result.q[:6].tolist(),'error':float(result.error)}
             elif method=='validate-path':
                 c=p['calibration']

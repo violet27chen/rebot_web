@@ -91,7 +91,7 @@ def attach(app,h):
     @router.post('/detect')
     def detect():return {'ok':True,**service.scene()}
     @router.post('/plan')
-    def plan(p:dict=Body(...)):return {'ok':True,**service.plan(p['scene_id'],p['target_id'])}
+    def plan(p:dict=Body(...)):return {'ok':True,**service.plan(p['scene_id'],p['target_id'],p.get('action'))}
     @router.post('/execute')
     def execute(p:dict=Body(...)):
         if p.get('confirm') is not True:raise SortingError('执行规则推拢与 ACT 需要明确二次确认')
@@ -136,10 +136,12 @@ def attach(app,h):
             safety=copy.deepcopy(service.settings()['safety']);safety.update(arms=h.arms(),heartbeat_path=str(session['heartbeat']),seed_rad=session['proposal']['initial_joints'])
             return {'ok':True,'value':service.control.call('init',safety,timeout=60)}
         if method=='scene':return {'ok':True,'value':service.scene()}
-        if method=='plan':return {'ok':True,'value':service.plan(value['scene_id'],value['target_id'])}
+        if method=='plan':return {'ok':True,'value':service.plan(value['scene_id'],value['target_id'],value.get('action'))}
+        if method=='label':return {'ok':True,'value':service.scan_label()}
+        if method=='validate':return {'ok':True,'value':service.kinematics('validate-path',{'from':value['from'],'to':value['to'],'calibration':service.settings()['calibration']})}
         if method=='frames':
             result={}
-            for feature,source in session['proposal']['skill']['camera_map'].items():
+            for feature,source in (value.get('camera_map') or session['proposal']['skill']['camera_map']).items():
                 lease=h.camera(source)
                 try:
                     _,frame=lease.read()
