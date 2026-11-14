@@ -2,9 +2,10 @@
 (function(){
   'use strict';document.addEventListener('rebot:eval-ready',mount,{once:true});
   async function mount(){
-    var A=window.APP,scene=null,plan=null,calibrationId='',busy=false,refreshing=false;
+    var A=window.APP,scene=null,plan=null,calibrationId='',busy=false,refreshing=false,sortingBind=null;
     function pretty(v){return v===undefined||v===null?'':JSON.stringify(v,null,2);}
     function parsed(v,name,fallback){if(!v.trim())return fallback;try{return JSON.parse(v);}catch(e){throw new Error(name+'不是有效 JSON');}}
+    function acceptAutosave(){if(sortingBind&&sortingBind.accept)sortingBind.accept();}
     function renderSkillTable(list){
       var tb=A.el('skillTableBody');if(!tb)return;
       if(!Array.isArray(list)||!list.length){tb.innerHTML='<tr><td colspan="7" class="muted">暂无登记技能（规则悬停扫码与向左推走可直接运行；如需翻面或抓取，请在上方选好后点「添加/更新技能」）</td></tr>';return;}
@@ -23,14 +24,14 @@
         cb.onchange=async function(){
           var i=Number(cb.getAttribute('data-sk-toggle'));
           var arr=parsed(A.el('sortingSkills').value,'技能清单',[]);
-          if(arr[i]){arr[i].enabled=cb.checked;A.el('sortingSkills').value=pretty(arr);await A.saveConfig({sorting:{skills:arr}});renderSkillTable(arr);await refresh();}
+          if(arr[i]){arr[i].enabled=cb.checked;A.el('sortingSkills').value=pretty(arr);acceptAutosave();await A.saveConfig({sorting:{skills:arr}});renderSkillTable(arr);await refresh();}
         };
       });
       tb.querySelectorAll('[data-sk-del]').forEach(function(btn){
         btn.onclick=async function(){
           var i=Number(btn.getAttribute('data-sk-del'));
           var arr=parsed(A.el('sortingSkills').value,'技能清单',[]);
-          arr.splice(i,1);A.el('sortingSkills').value=pretty(arr);await A.saveConfig({sorting:{skills:arr}});renderSkillTable(arr);await refresh();
+          arr.splice(i,1);A.el('sortingSkills').value=pretty(arr);acceptAutosave();await A.saveConfig({sorting:{skills:arr}});renderSkillTable(arr);await refresh();
         };
       });
     }
@@ -67,7 +68,15 @@
         }
       }catch(e){}
     }
-    function apply(c){var s=c.sorting||{},safe=s.safety||{},cyc=s.cycle||{};
+    function apply(c){
+      if(c&&!c.sorting&&('Yolo' in c||'Skills' in c||'Device' in c||'Torque' in c)){
+        ['Yolo','Device','Confidence','UseDepth','DefaultHeight','Skills','Torque','Limits','Velocity','Clearance','Push','MinArmDist','CycleArm','LeftDir'].forEach(function(k){
+          var el=A.el('sorting'+k);if(el&&c[k]!==undefined)el.value=c[k];
+        });
+        try{renderSkillTable(parsed(A.el('sortingSkills').value,'技能清单',[]));}catch(e){}
+        return;
+      }
+      var s=(c&&c.sorting)||{},safe=s.safety||{},cyc=s.cycle||{};
       var wantYolo=(s.yolo_model||'yolo11n-seg.pt').trim(),yEl=A.el('sortingYolo');
       if(yEl){
         if(!Array.from(yEl.options||[]).some(function(o){return o.value===wantYolo;})){
@@ -103,8 +112,9 @@
       r.targets.forEach(function(t){var b=t.xyxy;ctx.strokeStyle=t.valid?'#22c55e':'#ef4444';ctx.strokeRect(b[0],b[1],b[2]-b[0],b[3]-b[1]);ctx.fillStyle=ctx.strokeStyle;ctx.fillText(t.name+(t.valid?' · '+Math.round(t.height_m*1000)+' mm':''),b[0],Math.max(15,b[1]-4));});
     }
     try{
-      var cfg=await A.api.get('/api/config');apply(cfg);loadSkillOptions(cfg);
-      A.autosave.bind({id:'sorting:skills-control',section:'sorting',root:'#sortingConfig',read:read,apply:apply,
+      try{sessionStorage.removeItem('rebot.autosave.'+location.origin+location.pathname);}catch(e){}
+      var cfg=await A.api.get('/api/config');await loadSkillOptions(cfg);apply(cfg);
+      sortingBind=A.autosave.bind({id:'sorting:skills-control',section:'sorting',root:'#sortingConfig',read:read,apply:apply,
         write:async function(delta,full){var p={},map={Yolo:'yolo_model',Device:'device',Confidence:'confidence'};Object.keys(map).forEach(function(k){if(k in delta)p[map[k]]=k==='Confidence'?Number(full[k]):full[k];});
           if('UseDepth' in delta)p.use_depth=(full.UseDepth==='true');
           if('DefaultHeight' in delta)p.default_height_m=Number(full.DefaultHeight);
@@ -113,22 +123,25 @@
           if('CycleArm' in delta||'LeftDir' in delta){var cyc={};if('CycleArm' in delta)cyc.arm=full.CycleArm;if('LeftDir' in delta)cyc.left_direction=parsed(full.LeftDir,'向左方向向量',[-1,0,0]);p.cycle=cyc;}
           invalidate();await A.saveConfig({sorting:p});await refresh();}});
       [['sortingScanLeft','left'],['sortingScanRight','right'],['sortingScanTop',null]].forEach(function(pair){var el=A.el(pair[0]);if(!el)return;click(pair[0],async function(){var r=await post('label/scan',pair[1]?{side:pair[1]}:{});var codes=(r.codes||[]).map(function(c){return c.text+'('+c.type+')';}).join(', ')||'无条码';A.el('sortingScanResult').textContent=(pair[1]==='left'?'左腕':pair[1]==='right'?'右腕':'俯视')+'：状态='+r.status+' · 清晰度='+Math.round(r.sharpness)+' · 结果='+codes;});});
-      if(A.el('sortingAutoSkill'))click('sortingAutoSkill',async function(){var r=await post('skills/autofill',{});A.el('sortingSkills').value=pretty(r.skills);renderSkillTable(r.skills);A.el('sortingProgress').textContent=r.found_checkpoint?'已自动扫描并填入本机 ACT 检查点、数据集、标定版本与当前实测姿态。':'已自动生成默认技能配置（训练完 ACT 模型后再点一次即可自动启用）。';});
+      if(A.el('sortingAutoSkill'))click('sortingAutoSkill',async function(){var r=await post('skills/autofill',{});A.el('sortingSkills').value=pretty(r.skills);acceptAutosave();renderSkillTable(r.skills);var msg=r.found_checkpoint?'已自动扫描并填入本机 ACT 检查点、数据集、标定版本与当前实测姿态。':'已自动生成默认技能配置（训练完 ACT 模型后再点一次即可自动启用）。';A.el('sortingProgress').textContent=msg;A.ok(msg,'#sortingAlert');});
       if(A.el('btnSkillUpsert'))click('btnSkillUpsert',async function(){
         var payload={class_name:A.el('skClass').value,role:A.el('skRole').value,arm:A.el('skArm').value,duration_s:Number(A.el('skDuration').value)||8,checkpoint:A.el('skCkpt').value,dataset_repo:A.el('skDataset').value,enabled:true};
-        var r=await post('skills/upsert',payload);A.el('sortingSkills').value=pretty(r.skills);renderSkillTable(r.skills);
-        A.el('sortingProgress').textContent='已添加/更新类别「'+payload.class_name+'」的技能，并自动绑定当前标定与真机姿态。';
+        var r=await post('skills/upsert',payload);A.el('sortingSkills').value=pretty(r.skills);acceptAutosave();renderSkillTable(r.skills);
+        var msg='已添加/更新类别「'+payload.class_name+'」的技能，并自动绑定当前标定与真机姿态。';
+        A.el('sortingProgress').textContent=msg;A.ok(msg,'#sortingAlert');
       });
       if(A.el('btnSkillSync'))click('btnSkillSync',async function(){
-        var r=await post('skills/sync',{});A.el('sortingSkills').value=pretty(r.skills);renderSkillTable(r.skills);
-        A.el('sortingProgress').textContent='已将所有技能同步到最新空间标定版本'+(r.pose_updated?'与当前真机实测起始姿态。':'。');
+        var r=await post('skills/sync',{});A.el('sortingSkills').value=pretty(r.skills);acceptAutosave();renderSkillTable(r.skills);
+        var msg='已将所有技能同步到最新空间标定版本'+(r.pose_updated?'与当前真机实测起始姿态。':'。');
+        A.el('sortingProgress').textContent=msg;A.ok(msg,'#sortingAlert');
       });
       if(A.el('btnFillDefaultSafety'))click('btnFillDefaultSafety',async function(){
         var defTorq=[8,10,8,5,4,3,2.5,8,10,8,5,4,3,2.5];
         var defLim=[[-2.6,2.6],[-1.8,1.8],[-2.4,2.4],[-1.9,1.9],[-2.6,2.6],[-2.8,2.8],[-1.2,1.2],[-2.6,2.6],[-1.8,1.8],[-2.4,2.4],[-1.9,1.9],[-2.6,2.6],[-2.8,2.8],[-1.2,1.2]];
-        A.el('sortingTorque').value=pretty(defTorq);A.el('sortingLimits').value=pretty(defLim);
+        A.el('sortingTorque').value=pretty(defTorq);A.el('sortingLimits').value=pretty(defLim);acceptAutosave();
         await A.saveConfig({sorting:{safety:{torque_limits_nm:defTorq,joint_limits_rad:defLim}}});
-        A.el('sortingProgress').textContent='已填入并保存 B601-DM 双臂 14 电机推荐安全力矩与关节限位。';
+        var msg='已填入并保存 B601-DM 双臂 14 电机推荐安全力矩与关节限位。';
+        A.el('sortingProgress').textContent=msg;A.ok(msg,'#sortingAlert');
       });
       click('sortingDetect',async function(){invalidate();A.el('sortingProgress').textContent='加载本地 YOLO 并获取同步 RGB-D，首次加载可能较慢…';scene=await post('detect');await draw(scene);
         A.el('sortingTargets').innerHTML=scene.targets.length?scene.targets.map(function(t,index){return '<tr><td><label><input type="radio" name="sorting-target" value="'+A.esc(t.id)+'" '+(!t.valid?'disabled':'')+' '+(index===scene.targets.findIndex(function(x){return x.valid;})?'checked':'')+'> '+A.esc(t.name)+'</label></td><td>'+A.esc(t.valid?t.xyz_m.map(function(n){return n.toFixed(3);}).join(' / '):t.error)+'</td><td>'+(t.valid?Math.round(t.height_m*1000)+' mm':'—')+'</td><td>'+(t.points||0)+'</td><td>'+A.esc(t.skill||t.route_error||'深度无效')+'</td></tr>';}).join(''):'<tr><td colspan="5">未检测到包裹</td></tr>';
