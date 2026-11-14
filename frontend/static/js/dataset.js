@@ -149,7 +149,8 @@
   var recModal = {
     mask: null, tickTimer: null, active: false,
     numEpisodes: 1, epTimeS: 30, resetTimeS: 10, repoId: "",
-    curEp: 1, phase: "init", /* init | recording | reset | saving */
+    curEp: 1, firstRawEp: null,
+    phase: "init", /* init | recording | reset | preparing_next | saving */
     phaseStartMs: 0, sessionStartMs: 0, lastLog: ""
   };
 
@@ -216,6 +217,11 @@
         var k = b.getAttribute("data-rec-key");
         try {
           await A.api.post("/api/record/key", { key: k });
+          if (k === "right" && recModal.phase === "reset") {
+            recModal.phase = recModal.curEp < recModal.numEpisodes ? "preparing_next" : "saving";
+            recModal.phaseStartMs = Date.now();
+            updateRecordModalUI();
+          }
           A.toast("已发送按键 " + k.toUpperCase(), "ok");
         } catch (e) { A.toast(e.message, "err"); }
       });
@@ -252,14 +258,17 @@
     var now = Date.now();
     var elapsedPhase = (now - recModal.phaseStartMs) / 1000;
 
-    /* 当真实日志因缓冲延迟未到达时，按时间自动推演阶段 전환 */
+    /* 阶段切换规则：
+       1. init（启动准备中）：不倒计时，直到收到真实 "Recording episode" 日志才进入 recording；
+       2. recording（录制倒计时）：单集时间到后，若还有下一集且 resetTimeS > 0 则进入 reset，否则进入 preparing_next / saving；
+       3. reset（重置等待倒计时）：等待时间结束后，绝不提前抢跑下一集倒计时，而是进入 preparing_next 显示「准备中…」，直到收到下一集真实 "Recording episode" 日志才开始采集倒计时。 */
     if (recModal.phase === "recording" && elapsedPhase >= recModal.epTimeS) {
       if (recModal.curEp < recModal.numEpisodes && recModal.resetTimeS > 0) {
         recModal.phase = "reset";
         recModal.phaseStartMs = now;
         elapsedPhase = 0;
       } else if (recModal.curEp < recModal.numEpisodes) {
-        recModal.curEp++;
+        recModal.phase = "preparing_next";
         recModal.phaseStartMs = now;
         elapsedPhase = 0;
       } else {
@@ -269,8 +278,7 @@
       }
     } else if (recModal.phase === "reset" && elapsedPhase >= recModal.resetTimeS) {
       if (recModal.curEp < recModal.numEpisodes) {
-        recModal.curEp++;
-        recModal.phase = "recording";
+        recModal.phase = "preparing_next";
         recModal.phaseStartMs = now;
         elapsedPhase = 0;
       } else {
@@ -292,37 +300,68 @@
     var bar = mask.querySelector("#recModalBar");
     var hint = mask.querySelector("#recModalHint");
 
-    epInfo.textContent = "剧集 " + recModal.curEp + " / " + recModal.numEpisodes +
+    var displayEp = recModal.phase === "preparing_next"
+      ? Math.min(recModal.numEpisodes, recModal.curEp + 1)
+      : recModal.curEp;
+    epInfo.textContent = "剧集 " + displayEp + " / " + recModal.numEpisodes +
       (recModal.repoId ? (" · " + recModal.repoId) : "");
-    epSub.textContent = "单集时长 " + recModal.epTimeS + "s";
-    resetSub.textContent = recModal.curEp >= recModal.numEpisodes ? "最后一集无重置" : ("重置时长 " + recModal.resetTimeS + "s");
 
     var curEpLeft = recModal.epTimeS;
     var curResetLeft = recModal.curEp >= recModal.numEpisodes ? 0 : recModal.resetTimeS;
     var pct = 0;
 
     if (recModal.phase === "init") {
-      badge.textContent = "启动与连接设备";
-      badge.className = "badge";
-      curEpLeft = recModal.epTimeS;
-      curResetLeft = recModal.curEp >= recModal.numEpisodes ? 0 : recModal.resetTimeS;
-      boxEp.style.borderColor = "var(--border,#e2e8f0)";
-      boxEp.style.background = "transparent";
+      badge.textContent = "准备中 · 连接设备";
+      badge.className = "badge warn";
+      epRemain.textContent = "准备中…";
+      epSub.textContent = "真实开始采集后显示 " + recModal.epTimeS + "s 倒计时";
+      resetRemain.textContent = "等待开始";
+      resetSub.textContent = "重置时长 " + recModal.resetTimeS + "s";
+      boxEp.style.borderColor = "#f59e0b";
+      boxEp.style.background = "rgba(245,158,11,0.08)";
       boxReset.style.borderColor = "var(--border,#e2e8f0)";
       boxReset.style.background = "transparent";
-      pct = 2;
-      hint.textContent = recModal.lastLog || "正在初始化主从臂与摄像头，进入录制后自动开始倒计时…";
-    } else if (recModal.phase === "recording") {
+      bar.style.width = "4%";
+      totalInfo.textContent = "等待真机进入采集后开始计时…";
+      hint.textContent = recModal.lastLog || "正在初始化主从臂与摄像头，真实开始采集后自动显示倒计时…";
+      return;
+    }
+
+    if (recModal.phase === "preparing_next") {
+      var nextEp = Math.min(recModal.numEpisodes, recModal.curEp + 1);
+      badge.textContent = "准备中 · 即将开始第 " + nextEp + " 集";
+      badge.className = "badge warn";
+      epRemain.textContent = "准备中…";
+      epSub.textContent = "第 " + nextEp + " 集就绪后开始 " + recModal.epTimeS + "s 倒计时";
+      resetRemain.textContent = "00:00";
+      resetSub.textContent = "重置时间已过，正在准备下一集";
+      boxEp.style.borderColor = "#f59e0b";
+      boxEp.style.background = "rgba(245,158,11,0.08)";
+      boxReset.style.borderColor = "var(--border,#e2e8f0)";
+      boxReset.style.background = "transparent";
+      bar.style.width = "100%";
+      var remEps = Math.max(1, recModal.numEpisodes - recModal.curEp);
+      var remSec = remEps * recModal.epTimeS + Math.max(0, remEps - 1) * recModal.resetTimeS;
+      totalInfo.textContent = "正在准备第 " + nextEp + " 集 · 剩余约 " + fmtSec(remSec);
+      hint.textContent = "重置等待已结束，正在保存上一集并准备第 " + nextEp + " 集，真实开始采集后立即显示倒计时…";
+      return;
+    }
+
+    if (recModal.phase === "recording") {
       curEpLeft = Math.max(0, recModal.epTimeS - elapsedPhase);
       curResetLeft = recModal.curEp >= recModal.numEpisodes ? 0 : recModal.resetTimeS;
-      badge.textContent = "正在录制第 " + recModal.curEp + " 集";
+      badge.textContent = "正在采集第 " + recModal.curEp + " 集";
       badge.className = "badge ok";
       boxEp.style.borderColor = "var(--primary,#2563eb)";
       boxEp.style.background = "var(--bg-subtle,rgba(37,99,235,0.08))";
       boxReset.style.borderColor = "var(--border,#e2e8f0)";
       boxReset.style.background = "transparent";
       pct = Math.min(100, Math.max(0, (elapsedPhase / recModal.epTimeS) * 100));
-      hint.textContent = "请操作主臂完成动作示教；本集倒计时结束后将自动进入重置阶段。";
+      epRemain.textContent = fmtSec(curEpLeft);
+      epSub.textContent = "单集时长 " + recModal.epTimeS + "s";
+      resetRemain.textContent = recModal.curEp >= recModal.numEpisodes ? "无重置" : fmtSec(curResetLeft);
+      resetSub.textContent = recModal.curEp >= recModal.numEpisodes ? "最后一集无重置" : ("重置时长 " + recModal.resetTimeS + "s");
+      hint.textContent = "请操作主臂完成动作示教；本集倒计时结束后将进入重置等待阶段。";
     } else if (recModal.phase === "reset") {
       curEpLeft = 0;
       curResetLeft = Math.max(0, recModal.resetTimeS - elapsedPhase);
@@ -333,7 +372,11 @@
       boxReset.style.borderColor = "#f59e0b";
       boxReset.style.background = "rgba(245,158,11,0.08)";
       pct = recModal.resetTimeS > 0 ? Math.min(100, Math.max(0, (elapsedPhase / recModal.resetTimeS) * 100)) : 100;
-      hint.textContent = "请趁重置倒计时将桌面上的快递恢复到初始摆放位置，准备下一集录制。";
+      epRemain.textContent = "本集完成";
+      epSub.textContent = "单集时长 " + recModal.epTimeS + "s";
+      resetRemain.textContent = fmtSec(curResetLeft);
+      resetSub.textContent = "重置时长 " + recModal.resetTimeS + "s（结束后进入下一集准备）";
+      hint.textContent = "请趁重置倒计时将桌面上的包裹恢复到初始位置；倒计时结束后将准备下一集。";
     } else {
       curEpLeft = 0;
       curResetLeft = 0;
@@ -344,11 +387,13 @@
       boxReset.style.borderColor = "var(--border,#e2e8f0)";
       boxReset.style.background = "transparent";
       pct = 100;
+      epRemain.textContent = "已完成";
+      epSub.textContent = "全部剧集录制完成";
+      resetRemain.textContent = "00:00";
+      resetSub.textContent = "正在编码保存";
       hint.textContent = recModal.lastLog || "正在编码视频并安全收尾，完全结束后此窗口将自动关闭…";
     }
 
-    epRemain.textContent = fmtSec(curEpLeft);
-    resetRemain.textContent = fmtSec(curResetLeft);
     bar.style.width = pct.toFixed(1) + "%";
 
     var futureEps = Math.max(0, recModal.numEpisodes - recModal.curEp);
@@ -361,6 +406,7 @@
     readRecordParams();
     recModal.active = true;
     recModal.curEp = 1;
+    recModal.firstRawEp = null;
     recModal.phase = "init";
     recModal.phaseStartMs = Date.now();
     recModal.sessionStartMs = Date.now();
@@ -370,7 +416,7 @@
     if (btn) { btn.disabled = false; btn.textContent = "停止录制"; }
     updateRecordModalUI();
     clearInterval(recModal.tickTimer);
-    recModal.tickTimer = setInterval(updateRecordModalUI, 250);
+    recModal.tickTimer = setInterval(updateRecordModalUI, 200);
   }
 
   function closeRecordModal() {
@@ -388,7 +434,11 @@
     recModal.lastLog = line;
     var mEp = line.match(/Recording episode\s+(\d+)/i);
     if (mEp) {
-      recModal.curEp = Math.min(recModal.numEpisodes, Math.max(1, parseInt(mEp[1], 10) + 1));
+      var rawEp = parseInt(mEp[1], 10);
+      if (!isNaN(rawEp)) {
+        if (recModal.firstRawEp === null) recModal.firstRawEp = rawEp;
+        recModal.curEp = Math.min(recModal.numEpisodes, Math.max(1, (rawEp - recModal.firstRawEp) + 1));
+      }
       recModal.phase = "recording";
       recModal.phaseStartMs = Date.now();
       updateRecordModalUI();
@@ -401,12 +451,18 @@
       return;
     }
     if (/Re-record episode/i.test(line)) {
-      recModal.phase = "recording";
+      recModal.phase = "preparing_next";
       recModal.phaseStartMs = Date.now();
       updateRecordModalUI();
       return;
     }
-    if (/Stop recording|Finalize|Encoding|safe_record/i.test(line)) {
+    if (/Encoding videos for episode/i.test(line)) {
+      recModal.phase = recModal.curEp < recModal.numEpisodes ? "preparing_next" : "saving";
+      recModal.phaseStartMs = Date.now();
+      updateRecordModalUI();
+      return;
+    }
+    if (/Stop recording|Recording stopped|safe_record/i.test(line)) {
       recModal.phase = "saving";
       recModal.phaseStartMs = Date.now();
       updateRecordModalUI();
