@@ -281,6 +281,78 @@ class SortingService:
         self.save({'calibration':{'points':points,'alignment_verified':False,'workspace_verified':False,'arms':{'left':{'verified':False},'right':{'verified':False}}}})
         return len(points)
 
+    def autofill_skills(self,class_names=('bag','box'),role='flip'):
+        """自动扫描本机已训练的 14 维 ACT 检查点与数据集、当前标定 ID 和实测姿态，一键生成技能登记清单。"""
+        s=self.settings();c=s['calibration'];cal_id=fingerprint(c)
+        cfg_all=self.h.load_config()
+        # 1. 查找可用的 14 维 ACT pretrained_model
+        candidates=[]
+        eval_p=(cfg_all.get('eval') or {}).get('policy_path') or ''
+        if eval_p:candidates.append(self.h.root/eval_p if not Path(eval_p).is_absolute() else Path(eval_p))
+        out_dir=self.h.root/'outputs/train'
+        if out_dir.is_dir():
+            candidates.extend(sorted(out_dir.rglob('pretrained_model'),key=lambda p:p.stat().st_mtime,reverse=True))
+        ckpt=None;ckpt_cfg=None
+        for cand in candidates:
+            if (cand/'config.json').is_file() and (cand/'model.safetensors').is_file():
+                try:
+                    jc=json.loads((cand/'config.json').read_text())
+                    if jc.get('type')=='act' and ((jc.get('output_features') or {}).get('action') or {}).get('shape')==[14]:
+                        ckpt=cand;ckpt_cfg=jc;break
+                except Exception:pass
+        # 2. 查找 14 维数据集 meta/info.json
+        lerobot_home=Path.home()/'.cache/huggingface/lerobot'
+        ds_info=None;ds_task=(cfg_all.get('dataset') or {}).get('single_task') or 'Flip package'
+        preferred_repo=(cfg_all.get('dataset') or {}).get('repo_id') or 'kuaidi2'
+        info_cands=[]
+        if (lerobot_home/preferred_repo/'meta/info.json').is_file():
+            info_cands.append(lerobot_home/preferred_repo/'meta/info.json')
+        if lerobot_home.is_dir():
+            info_cands.extend(sorted(lerobot_home.rglob('meta/info.json'),key=lambda p:p.stat().st_mtime,reverse=True))
+        for ic in info_cands:
+            try:
+                ji=json.loads(ic.read_text());feats=ji.get('features') or {}
+                sn=(feats.get('observation.state') or {}).get('names')
+                if isinstance(sn,list) and len(sn)==14:
+                    ds_info=ic;break
+            except Exception:pass
+        # 3. 相机映射与实测起始姿态
+        cams=cfg_all.get('cameras') or []
+        by_name={str(cm.get('name','')):str(cm.get('index_or_path','')) for cm in cams if cm.get('index_or_path')}
+        first_cam=next(iter(by_name.values()),str(s.get('camera_source') or '0'))
+        cam_map={}
+        visual_keys=[k for k in ((ckpt_cfg or {}).get('input_features') or {}) if k.startswith('observation.images.')]
+        if not visual_keys:visual_keys=['observation.images.top']
+        for vk in visual_keys:
+            short=vk.replace('observation.images.','').replace('left_','').replace('right_','')
+            cam_map[vk]=by_name.get(short) or (s.get('camera_source') if '深度' in short or 'top' in short else None) or first_cam
+        try:start_pose=[round(float(x),4) for x in self.h.measured()]
+        except Exception:start_pose=[0.0]*14
+        cyc=s.get('cycle') or {}
+        rpys=cyc.get('approach_rpy') or {'left':[0.0,1.45,0.0],'right':[0.0,1.45,0.0]}
+        w_bounds=c.get('workspace_bounds') or [[-0.45,0.45],[-0.45,0.45],[-0.03,0.38]]
+        skills=[]
+        for cls_name in class_names:
+            skills.append({
+                'name':f'{role}_{cls_name}',
+                'class_name':cls_name,
+                'role':role,
+                'enabled':bool(ckpt and ds_info),
+                'arm':'right',
+                'checkpoint':str(ckpt) if ckpt else '/请填写训练完成的ACT检查点目录/pretrained_model',
+                'dataset_info':str(ds_info) if ds_info else '/请填写对应数据集目录/meta/info.json',
+                'calibration_id':cal_id,
+                'training_bounds':w_bounds,
+                'start_pose_rad':start_pose,
+                'start_tolerance_rad':0.25,
+                'approach_rpy':rpys,
+                'camera_map':cam_map,
+                'task':ds_task,
+                'duration_s':8
+            })
+        self.save({'skills':skills})
+        return {'skills':skills,'found_checkpoint':bool(ckpt),'found_dataset_info':bool(ds_info)}
+
     def solve(self,kind):
         c=self.settings()['calibration'];points=c.get('points') or []
         if kind=='alignment':

@@ -51,6 +51,11 @@ def attach(app,h):
     def depth(p:dict=Body(...)):return {'ok':True,'intrinsics':service.adopt_depth(p['frame_id'])}
     @router.post('/calibration/auto')
     def calib_auto(p:dict=Body(default={})):return {'ok':True,**service.auto_calibrate(p.get('frame_id'))}
+    @router.post('/skills/autofill')
+    def skills_autofill(p:dict=Body(default={})):
+        classes=p.get('class_names') or ['bag','box']
+        role=p.get('role') or 'flip'
+        return {'ok':True,**service.autofill_skills(classes,role)}
     @router.post('/calibration/board')
     def board(p:dict=Body(...)):
         return {'ok':True,**service.board(p['frame_id'],int(p['columns']),int(p['rows']),float(p['square_m']))}
