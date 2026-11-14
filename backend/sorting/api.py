@@ -39,7 +39,6 @@ def attach(app,h):
         try:service.check_camera(s)
         except SortingError as exc:errors.append(str(exc))
         if not s['yolo_model']:errors.append('尚未选择 YOLO 检测模型')
-        if not s['skills']:errors.append('尚未登记独立 ACT 技能')
         if s['safety'].get('torque_limits_nm') is None or s['safety'].get('joint_limits_rad') is None:errors.append('尚未配置 14 个电机的力矩上限和原始关节限位')
         return {'ok':True,'version':h.version(),'settings':s,'calibration_id':fingerprint(s['calibration']),
                 'ready':not errors,'errors':errors,'control_active':bool(service.control and service.control.alive()),
@@ -50,6 +49,8 @@ def attach(app,h):
     def label_scan(p:dict=Body(default={})):return {'ok':True,**service.scan_label(p.get('source'),p.get('side'))}
     @router.post('/calibration/depth')
     def depth(p:dict=Body(...)):return {'ok':True,'intrinsics':service.adopt_depth(p['frame_id'])}
+    @router.post('/calibration/auto')
+    def calib_auto(p:dict=Body(default={})):return {'ok':True,**service.auto_calibrate(p.get('frame_id'))}
     @router.post('/calibration/board')
     def board(p:dict=Body(...)):
         return {'ok':True,**service.board(p['frame_id'],int(p['columns']),int(p['rows']),float(p['square_m']))}

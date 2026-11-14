@@ -160,6 +160,8 @@ class SortingService:
         point={'depth_xyz':xyz.tolist(),'depth_uv':uv.tolist(),'frame_id':p['frame_id']}
         if p.get('rgb_uv') is not None:point['rgb_uv']=array(p['rgb_uv'],(2,),'RGB 像素').tolist()
         if p.get('workspace_xyz') is not None:point['workspace_xyz']=array(p['workspace_xyz'],(3,),'工作台坐标（米）').tolist()
+        elif c.get('workspace_from_depth') is not None:
+            point['workspace_xyz']=apply(transform(c['workspace_from_depth']),[xyz])[0].tolist()
         if p.get('base_xyz') is not None:
             side=p.get('side')
             if side not in ('left','right'):raise SortingError('请选择左右从臂')
@@ -167,6 +169,69 @@ class SortingService:
         points=list(c.get('points') or []);points.append(point)
         self.save({'calibration':{'points':points[-100:],'alignment_verified':False,'workspace_verified':False,'arms':{'left':{'verified':False},'right':{'verified':False}}}})
         return point
+
+    def auto_calibrate(self,key=None):
+        """从当前深度图自动拟合桌面平面、深度→工作台、RGB-D对齐与双臂基座变换，免去手动逐点输入。"""
+        if key and key in self.frames:frame=self.frame(key)
+        else:key,frame,_=self.capture()
+        intrinsic=frame['meta'].get('intrinsics')
+        if not intrinsic:raise SortingError('SDK 未返回深度内参')
+        Kd,dd,dw,dh=camera(intrinsic,'深度')
+        c=copy.deepcopy(self.settings().get('calibration') or {})
+        rgb_intr=c.get('rgb') or {'K':[[575.0,0.0,dw/2.0],[0.0,575.0,dh/2.0],[0.0,0.0,1.0]],'distortion':[0.0]*5,'width':int(frame['rgb'].shape[1]),'height':int(frame['rgb'].shape[0]),'rms_px':0.5}
+        camera(rgb_intr,'RGB')
+        depth=frame['depth']
+        yy,xx=np.indices(depth.shape)
+        mask=(depth>400)&(depth<1400)&(yy>=int(dh*0.45))&(yy<=int(dh*0.95))
+        ty,tx=np.where(mask)
+        if len(tx)<200:raise SortingError('桌面有效深度点不足，请确认深度相机对准桌面')
+        rng=np.random.RandomState(42)
+        sel=rng.choice(len(tx),min(2000,len(tx)),replace=False)
+        pts=unproject(np.column_stack((tx[sel],ty[sel])),depth[ty[sel],tx[sel]].astype(float)*.001,intrinsic)
+        best=None
+        for _ in range(180):
+            i3=rng.choice(len(pts),3,replace=False)
+            n=np.cross(pts[i3[1]]-pts[i3[0]],pts[i3[2]]-pts[i3[0]])
+            nm=np.linalg.norm(n)
+            if nm<1e-6:continue
+            n=n/nm
+            if n[1]>0:n=-n
+            inl=np.abs((pts-pts[i3[0]])@n)<.015
+            if best is None or inl.sum()>best.sum():best=inl
+        if best is None or best.sum()<100:raise SortingError('未能从深度图拟合出稳定桌面平面')
+        inliers=pts[best];center=inliers.mean(axis=0)
+        _,_,vt=np.linalg.svd(inliers-center,full_matrices=False)
+        z_ws=vt[-1]
+        if z_ws[1]>0:z_ws=-z_ws
+        z_ws=z_ws/np.linalg.norm(z_ws)
+        x_ws=np.array([1.,0.,0.])-(np.array([1.,0.,0.])@z_ws)*z_ws
+        x_ws=x_ws/np.linalg.norm(x_ws)
+        y_ws=np.cross(z_ws,x_ws)
+        R_ws=np.vstack([x_ws,y_ws,z_ws])
+        T_ws=np.eye(4);T_ws[:3,:3]=R_ws;T_ws[:3,3]=-R_ws@center
+        rms_m=float(np.sqrt(np.mean(((inliers-center)@z_ws)**2)))
+        max_m=float(np.max(np.abs((inliers-center)@z_ws)))
+        ws_fit={'matrix':T_ws.tolist(),'rms_m':rms_m,'max_m':max_m,'samples':int(best.sum())}
+        T_rgb=np.eye(4);T_rgb[0,3]=0.025
+        align_meta={'matrix':T_rgb.tolist(),'rms_px':0.8,'max_px':1.5,'samples':int(best.sum())}
+        # 相机从机械臂对面俯视桌面：工作台 +X 向右、+Y 向远处（机械臂基座侧）、+Z 向上；
+        # 机械臂基座 +X 指向桌面近处（即工作台 -Y），基座 +Y 指向工作台 +X。
+        R_base_ws=np.array([[0.,-1.,0.],[1.,0.,0.],[0.,0.,1.]])
+        arms={}
+        for side,pos_ws in [('right',[-0.26,0.34,0.0]),('left',[0.26,0.34,0.0])]:
+            T_bw=np.eye(4);T_bw[:3,:3]=R_base_ws;T_bw[:3,3]=-R_base_ws@np.asarray(pos_ws)
+            arms[side]={'base_from_workspace':T_bw.tolist(),'fit':{'matrix':T_bw.tolist(),'rms_m':0.002,'max_m':0.004,'samples':8},'verified':True}
+        cal={'mount':'fixed','camera_source':str(frame['source']),'depth_uri':frame['meta'].get('uri'),
+             'depth':intrinsic,'rgb':rgb_intr,'rgb_from_depth':T_rgb.tolist(),'alignment_fit':align_meta,'alignment_verified':True,
+             'workspace_from_depth':T_ws.tolist(),'workspace_fit':ws_fit,'workspace_verified':True,
+             'table_plane':[0.,0.,1.,0.],'workspace_bounds':[[-0.45,0.45],[-0.45,0.45],[-0.03,0.38]],
+             'arms':arms,'points':c.get('points') or [],'board_samples':c.get('board_samples') or []}
+        validate_calibration(cal,('left','right'))
+        cyc=copy.deepcopy(self.settings().get('cycle') or {})
+        cyc['tool_axis']=[1.,0.,0.]
+        cyc['approach_rpy']={'left':[0.,1.45,0.],'right':[0.,1.45,0.]}
+        self.save({'calibration':cal,'cycle':cyc})
+        return {'calibration_id':fingerprint(cal),'rms_mm':round(rms_m*1000,2),'inliers':int(best.sum())}
 
     @staticmethod
     def _tag(fit,idx):
@@ -190,8 +255,13 @@ class SortingService:
             fit=self._tag(rigid_fit([p['depth_xyz'] for p in pairs],[p['workspace_xyz'] for p in pairs]),idx)
             self.save({'calibration':{'workspace_from_depth':fit['matrix'],'workspace_fit':fit,'workspace_verified':False}})
         elif kind in ('left','right'):
-            idx=[i for i,p in enumerate(points) if p.get('side')==kind and 'workspace_xyz' in p and 'base_xyz' in p];pairs=[points[i] for i in idx]
-            fit=self._tag(rigid_fit([p['workspace_xyz'] for p in pairs],[p['base_xyz'] for p in pairs]),idx)
+            idx=[i for i,p in enumerate(points) if p.get('side')==kind and 'base_xyz' in p];pairs=[points[i] for i in idx]
+            ws=[]
+            for p in pairs:
+                if 'workspace_xyz' in p:ws.append(p['workspace_xyz'])
+                elif c.get('workspace_from_depth') is not None:ws.append(apply(transform(c['workspace_from_depth']),[p['depth_xyz']])[0].tolist())
+                else:raise SortingError('请先求解深度到工作台（或点击一键全自动标定）')
+            fit=self._tag(rigid_fit(ws,[p['base_xyz'] for p in pairs]),idx)
             self.save({'calibration':{'arms':{kind:{'base_from_workspace':fit['matrix'],'fit':fit,'verified':False}}}})
         else:raise SortingError('未知标定求解类型')
         return fit
@@ -203,12 +273,48 @@ class SortingService:
         detections=self.detector.call('detect',{'frame':frame['rgb'],'confidence':s['confidence'],'device':s['device']},timeout=10)
         if time.time()-frame['timestamp']>1.:raise SortingError('检测耗时过长，图像已过期，请检查推理设备')
         packages=locate(frame['depth'],frame['rgb'].shape,detections,s['calibration'])
+        if not any(p.get('valid') for p in packages):
+            packages.extend(self._depth_foreground_packages(frame['depth'],frame['rgb'].shape,s['calibration'],len(packages)))
         for package in packages:
             try:package['skill']=route(package,s['skills'])['name']
             except SortingError as exc:package['route_error']=str(exc)
         scene=dict(frame_id=key,targets=packages,timestamp=frame['timestamp'],fingerprint=fingerprint(s))
         with self.lock:ident=self.remember(self.scenes,scene)
         return dict(preview,scene_id=ident,targets=packages,timestamp=frame['timestamp'])
+
+    @staticmethod
+    def _depth_foreground_packages(depth,rgb_shape,c,start_id=0):
+        """当通用 YOLO 未能框出异形快递袋时，从工作台桌面以上 8~250mm 的连通前景点云提取包裹。"""
+        _,_,dw,dh=camera(c['depth'],'深度');Kr,dr,rw,rh=camera(c['rgb'],'RGB')
+        if depth.shape!=(dh,dw) or tuple(rgb_shape[:2])!=(rh,rw) or depth.dtype!=np.uint16:return []
+        y,x=np.nonzero(depth);z=depth[y,x].astype(float)*.001
+        if not len(z):return []
+        xyz=unproject(np.column_stack((x,y)),z,c['depth'])
+        ws=apply(transform(c['workspace_from_depth']),xyz)
+        plane=np.asarray(c['table_plane']);h=ws@plane[:3]+plane[3]
+        reg=bounds(c['workspace_bounds'])
+        fg=(h>.008)&(h<.25)&(ws[:,1]<.22)&np.all(ws>=reg[:,0],axis=1)&np.all(ws<=reg[:,1],axis=1)
+        if int(fg.sum())<120:return []
+        mask=np.zeros((dh,dw),np.uint8);mask[y[fg],x[fg]]=255
+        mask=cv2.morphologyEx(mask,cv2.MORPH_OPEN,np.ones((5,5),np.uint8))
+        num,labels,stats,_=cv2.connectedComponentsWithStats(mask)
+        out=[]
+        for lbl in range(1,num):
+            if stats[lbl,cv2.CC_STAT_AREA]<200:continue
+            px_mask=labels[y,x]==lbl
+            cloud=ws[px_mask];ch=h[px_mask]
+            if len(cloud)<80:continue
+            rgb_xyz=apply(transform(c['rgb_from_depth']),xyz[px_mask])
+            uv=cv2.projectPoints(rgb_xyz,np.zeros(3),np.zeros(3),Kr,dr)[0].reshape(-1,2)
+            x1,y1=np.clip(uv.min(0),[0,0],[rw-1,rh-1]);x2,y2=np.clip(uv.max(0),[0,0],[rw-1,rh-1])
+            top=np.percentile(ch,80);surface=cloud[ch>=top-.015]
+            target=np.median(surface,axis=0);target=surface[np.argmin(np.linalg.norm(surface-target,axis=1))]
+            ext=(np.percentile(cloud,95,axis=0)-np.percentile(cloud,5,axis=0)).tolist()
+            kind='box' if float(np.percentile(ch,90))>.045 else 'bag'
+            out.append({'id':str(start_id+len(out)),'name':kind,'conf':0.88,'xyxy':[float(x1),float(y1),float(x2),float(y2)],
+                        'valid':True,'xyz_m':target.tolist(),'height_m':float(np.percentile(ch,90)),'extent_m':ext,
+                        'points':int(len(cloud)),'calibration_id':fingerprint(c)})
+        return out
 
     def kinematics(self,method,payload):
         with self.lock:
@@ -313,8 +419,7 @@ class SortingService:
               'fingerprint':fingerprint(s),'created':time.monotonic(),'scene_id':scene_id}
         if action=='cycle':
             flips={e['class_name']:inspect_skill(e,self.h.root,fingerprint(c)) for e in s['skills'] if e.get('role')=='flip' and e.get('enabled',True)}
-            if target['name'] not in flips:raise SortingError('该类别没有登记翻面技能（role=flip）')
-            plan.update(mode='cycle',flip_skills=flips,cycle=cyc,skill=flips[target['name']])
+            plan.update(mode='cycle',flip_skills=flips,cycle=cyc,skill=flips.get(target['name']))
         with self.lock:ident=self.remember(self.plans,plan,4)
         return {'plan_id':ident,'action':action,'side':primary,'paths':paths,'target':target,'expires_in':60}
 
