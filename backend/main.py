@@ -4554,6 +4554,42 @@ def api_dataset_replay(payload: Optional[dict] = Body(default=None)):
     return start_job("replay", "数据集回放", load_config(), payload)
 
 
+@app.get("/api/dataset/export")
+def api_export_dataset(repo_id: str, mode: str = "all"):
+    """一键导出已录制数据集（mode=all 导出完整数据集含数据+视频，mode=videos 仅导出视频 MP4）。"""
+    import zipfile
+    from starlette.background import BackgroundTask
+    target = _safe_dataset_path(repo_id)
+    if target is None or not target.is_dir():
+        raise ApiError("数据集不存在或路径非法", 404)
+    only_videos = (str(mode).lower() == "videos")
+    src_root = (target / "videos") if only_videos else target
+    if only_videos and not src_root.is_dir():
+        raise ApiError("该数据集内没有已编码的视频目录（videos/）", 404)
+    files = [f for f in sorted(src_root.rglob("*")) if f.is_file()]
+    if not files:
+        raise ApiError("没有可导出的文件", 404)
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", repo_id.strip("/")) or "dataset"
+    suffix = "_videos.zip" if only_videos else "_full.zip"
+    fd, tmp_zip = tempfile.mkstemp(prefix=f"rebot_{safe_name}_", suffix=".zip")
+    os.close(fd)
+    try:
+        with zipfile.ZipFile(tmp_zip, "w", compression=zipfile.ZIP_STORED) as zf:
+            for f in files:
+                rel = f.relative_to(target)
+                zf.write(f, arcname=f"{safe_name}/{rel.as_posix()}")
+    except Exception as exc:
+        Path(tmp_zip).unlink(missing_ok=True)
+        raise ApiError(f"打包导出失败：{_brief(exc)}", 500)
+    HUB.log(f"[导出] 数据集 {repo_id} ({'仅视频' if only_videos else '完整数据+视频'}，共 {len(files)} 个文件)", "ok")
+    return FileResponse(
+        tmp_zip,
+        media_type="application/zip",
+        filename=f"{safe_name}{suffix}",
+        background=BackgroundTask(lambda p=tmp_zip: Path(p).unlink(missing_ok=True)),
+    )
+
+
 @app.delete("/api/datasets/{repo_id:path}")
 def api_delete_dataset(repo_id: str, confirm: bool = False):
     if not confirm:
@@ -5083,25 +5119,73 @@ def api_yolo_image_delete(name: str, split: str = "train", file: str = ""):
 def api_yolo_capture(name: str, payload: Optional[dict] = Body(default=None)):
     p = _yolo_require(name)
     e = payload or {}
-    try:
-        idx = int(e.get("camera_index") if e.get("camera_index") is not None else 0)
-    except (TypeError, ValueError):
-        raise ApiError("camera_index 必须是整数", 400)
-    cap = camera_probe(idx)
+    split = str(e.get("split") or "train")
+    _yolo_split(p, split)
+    raw_src = e.get("camera_source")
+    if raw_src is None or str(raw_src).strip() == "":
+        raw_src = e.get("camera_index", 0)
+    src_str = str(raw_src).strip()
+    src: Any = int(src_str) if src_str.lstrip("-").isdigit() else src_str
+    cap = camera_probe(src)
     try:
         ret, frame = cap.read()
     finally:
         cap.release()
     if not ret or frame is None:
-        raise ApiError(f"摄像头 index={idx} 读取画面失败", 500)
+        raise ApiError(f"摄像头 {src} 读取画面失败", 500)
     try:
         import cv2  # type: ignore
     except ImportError:
         raise ApiError("未安装 opencv-python", 503)
     fn = time.strftime("cap_%Y%m%d_%H%M%S_") + f"{int(time.time() * 1000) % 1000:03d}.jpg"
-    cv2.imwrite(str(p / "images/train" / fn), frame)
-    HUB.log(f"[YOLO] {name} 采集一张：{fn}", "ok")
-    return ok(file=fn)
+    dest = p / "images" / split / fn
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(dest), frame)
+    HUB.log(f"[YOLO] {name} ({split}) 采集一张：{fn}", "ok")
+    return ok(file=fn, split=split)
+
+
+@app.get("/api/yolo/datasets/{name}/export")
+def api_yolo_export(name: str):
+    """一键导出 YOLO 数据集为标准 Ultralytics zip（含 images/、labels/、classes.txt、data.yaml）。"""
+    import zipfile
+    from starlette.background import BackgroundTask
+    p = _yolo_require(name)
+    classes = _yolo_classes(p)
+    files = [f for f in sorted(p.rglob("*")) if f.is_file()]
+    if not files:
+        raise ApiError("该 YOLO 数据集为空，无法导出", 404)
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", p.name) or "yolo_dataset"
+    fd, tmp_zip = tempfile.mkstemp(prefix=f"yolo_{safe_name}_", suffix=".zip")
+    os.close(fd)
+    yaml_lines = [
+        "path: .",
+        "train: images/train",
+        "val: images/val",
+        f"nc: {len(classes)}",
+        "names: " + json.dumps(classes, ensure_ascii=False),
+        "",
+    ]
+    try:
+        with zipfile.ZipFile(tmp_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            has_yaml = False
+            for f in files:
+                rel = f.relative_to(p).as_posix()
+                if rel == "data.yaml":
+                    has_yaml = True
+                zf.write(f, arcname=f"{safe_name}/{rel}")
+            if not has_yaml:
+                zf.writestr(f"{safe_name}/data.yaml", "\n".join(yaml_lines))
+    except Exception as exc:
+        Path(tmp_zip).unlink(missing_ok=True)
+        raise ApiError(f"打包 YOLO 数据集失败：{_brief(exc)}", 500)
+    HUB.log(f"[YOLO] 导出数据集 {p.name}.zip（共 {len(files)} 个文件）", "ok")
+    return FileResponse(
+        tmp_zip,
+        media_type="application/zip",
+        filename=f"{safe_name}_yolo.zip",
+        background=BackgroundTask(lambda path=tmp_zip: Path(path).unlink(missing_ok=True)),
+    )
 
 
 @app.post("/api/yolo/datasets/{name}/split")
@@ -5700,6 +5784,9 @@ _DINO_WORDS = {
     "方块": "cube", "立方体": "cube", "圆柱体": "cylinder", "圆柱": "cylinder",
     "球": "ball", "杯子": "cup", "杯": "cup", "瓶子": "bottle", "瓶": "bottle",
     "香蕉": "banana", "苹果": "apple", "盒子": "box", "箱子": "box", "箱": "box",
+    "快递盒": "cardboard box", "纸箱": "cardboard box", "快递袋": "plastic parcel bag",
+    "快递": "package", "包裹": "package", "袋子": "bag", "塑料袋": "plastic bag",
+    "面单": "shipping label", "条码": "barcode", "标签": "label",
     "方块": "cube", "零件": "part", "物体": "object",
 }
 
@@ -5810,7 +5897,36 @@ def api_ai_grounding(payload: Optional[dict] = Body(default=None)):
 
 @app.post("/api/ai/grounding-batch")
 def api_ai_grounding_batch(payload: Optional[dict] = Body(default=None)):
-    raise ApiError("批量 Grounding DINO 请逐张点「本地 Grounding DINO 预标注」", 400)
+    """批量运行本地 Grounding DINO 预标注（默认仅标注未标注图片，也可标注当前划分全部图片）。"""
+    e = payload or {}
+    ds = str(e.get("dataset") or "")
+    p = _yolo_require(ds)
+    split = str(e.get("split") or "train")
+    d = _yolo_split(p, split)
+    classes = _yolo_classes(p)
+    if not classes:
+        raise ApiError("数据集还没有类别，请先添加类别", 400)
+    only_unlabeled = bool(e.get("only_unlabeled", True))
+    files = sorted([f.name for f in d.iterdir() if f.is_file() and f.suffix.lower() in IMG_EXTS]) if d.is_dir() else []
+    if only_unlabeled:
+        files = [fn for fn in files if not (p / "labels" / split / (Path(fn).stem + ".txt")).is_file() or not (p / "labels" / split / (Path(fn).stem + ".txt")).read_text("utf-8", errors="ignore").strip()]
+    if not files:
+        return {"ok": True, "total": 0, "succeeded": 0, "failed": 0, "total_boxes": 0, "note": "当前没有待标注的图片"}
+    conf = float(e.get("conf") or 0.2)
+    max_boxes = int(e.get("max_boxes") or 100)
+    succeeded, failed, total_boxes = 0, 0, 0
+    errors = []
+    for fn in files[:50]:
+        try:
+            r = api_ai_grounding({"dataset": ds, "split": split, "file": fn, "conf": conf, "max_boxes": max_boxes})
+            succeeded += 1
+            total_boxes += int(r.get("count") or 0)
+        except Exception as exc:
+            failed += 1
+            if len(errors) < 10:
+                errors.append(f"{fn}: {_brief(exc)}")
+    HUB.log(f"[DINO批量] {ds}/{split}: 成功 {succeeded} 张（共 {total_boxes} 框），未检出/失败 {failed} 张", "ok")
+    return {"ok": True, "total": len(files[:50]), "succeeded": succeeded, "failed": failed, "total_boxes": total_boxes, "errors": errors}
 
 
 ARM_PY = "/home/legion/miniconda3/envs/rebotarm/bin/python"

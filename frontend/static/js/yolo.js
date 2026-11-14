@@ -13,14 +13,23 @@
 
   function apiBase() { return "/api/yolo/datasets/" + encodeURIComponent(state.ds.name); }
 
+  function selectedCamSource() {
+    var sel = A.el("camSource");
+    if (sel && sel.value !== undefined && sel.value !== "") return sel.value;
+    return String(parseInt(A.el("camIndex").value, 10) || 0);
+  }
+
   function collectYolo() {
+    var src = selectedCamSource();
+    var numIdx = /^\d+$/.test(String(src)) ? parseInt(src, 10) : (parseInt(A.el("camIndex").value, 10) || 0);
     return {
       model: A.el("yModel").value.trim() || "yolov8n.pt",
       epochs: parseInt(A.el("yEpochs").value, 10) || 50,
       imgsz: parseInt(A.el("yImgsz").value, 10) || 640,
       batch: parseInt(A.el("yBatch").value, 10) || 8,
       device: A.el("yDevice").value.trim() || "cuda",
-      camera_index: parseInt(A.el("camIndex").value, 10) || 0
+      camera_index: numIdx,
+      camera_source: String(src)
     };
   }
   var yoloAutosave=null;
@@ -34,6 +43,27 @@
       if (y.imgsz) A.el("yImgsz").value = y.imgsz;
       if (y.batch) A.el("yBatch").value = y.batch;
       if (y.device) A.el("yDevice").value = y.device;
+      var camSel = A.el("camSource");
+      if (camSel) {
+        var opts = [], seen = {};
+        function addOpt(val, label) {
+          var k = String(val);
+          if (!k || seen[k]) return;
+          seen[k] = true;
+          opts.push('<option value="' + A.esc(k) + '">' + A.esc(label) + '</option>');
+        }
+        var topCam = c.sorting && c.sorting.camera_source;
+        if (topCam) addOpt(topCam, "俯视主相机 · " + topCam);
+        (c.cameras || []).forEach(function (cm, idx) {
+          if (cm && cm.index_or_path !== undefined && cm.index_or_path !== "") {
+            addOpt(cm.index_or_path, "已配置[" + (cm.name || ("第" + (idx + 1) + "路")) + "] · " + cm.index_or_path);
+          }
+        });
+        [0, 1, 2, 3].forEach(function (i) { addOpt(String(i), "UVC 摄像头 index=" + i); });
+        camSel.innerHTML = opts.join("");
+        var savedCam = y.camera_source || A.load("yolo.cam_source", "") || topCam || String((y.camera_index !== undefined && y.camera_index !== null) ? y.camera_index : A.load("yolo.cam", 0));
+        if (savedCam && seen[String(savedCam)]) camSel.value = String(savedCam);
+      }
       var cam = (y.camera_index !== undefined && y.camera_index !== null)
         ? y.camera_index : A.load("yolo.cam", 0);
       A.el("camIndex").value = cam;
@@ -668,13 +698,88 @@
       A.el("saveState").textContent = "已改类别：" + classLabel(state.prefCls);
     }
   });
-  ["camIndex", "yModel", "yEpochs", "yImgsz", "yBatch", "yDevice"].forEach(function (id) {
+  ["camSource", "camIndex", "yModel", "yEpochs", "yImgsz", "yBatch", "yDevice"].forEach(function (id) {
     var el = A.el(id);
     if (!el) return;
     el.addEventListener("change", function () {
+      if (id === "camSource") {
+        A.store("yolo.cam_source", el.value);
+        if (/^\d+$/.test(el.value)) {
+          A.el("camIndex").value = parseInt(el.value, 10);
+          A.store("yolo.cam", parseInt(el.value, 10));
+        }
+      }
       if (id === "camIndex") A.store("yolo.cam", parseInt(el.value, 10) || 0);
       saveYolo();
     });
+  });
+
+  A.click("btnExportYoloZip", function () {
+    if (!state.ds) { A.toast("请先选择一个数据集", "warn"); return; }
+    var url = apiBase() + "/export";
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = state.ds.name + "_yolo.zip";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    A.ok("正在导出数据集 zip：" + state.ds.name, "#yoloAlert");
+  });
+
+  A.click("btnQuickSnap", function () {
+    if (!state.ds) { A.toast("先选择或新建一个数据集", "warn"); return; }
+    A.action(async function () {
+      var src = selectedCamSource();
+      var r = await A.api.post(apiBase() + "/capture", { camera_source: src, split: state.split });
+      A.ok("已直接抓拍并保存：" + r.file, "#yoloAlert");
+      await refreshCurrentDataset();
+      await loadImages(false);
+      openImage(r.file);
+    }, "#yoloAlert");
+  });
+
+  var burstAbort = false, burstRunning = false;
+  A.click("btnBurstCapture", async function () {
+    if (!state.ds) { A.toast("先选择或新建一个数据集", "warn"); return; }
+    var btn = A.el("btnBurstCapture"), st = A.el("burstState");
+    if (burstRunning) {
+      burstAbort = true;
+      st.textContent = "正在停止连拍…";
+      return;
+    }
+    var count = Math.max(2, Math.min(100, parseInt(A.el("burstCount").value, 10) || 10));
+    var intervalS = Math.max(0.5, Math.min(10, parseFloat(A.el("burstInterval").value) || 1.5));
+    var src = selectedCamSource();
+    burstRunning = true;
+    burstAbort = false;
+    btn.textContent = "停止连拍";
+    btn.className = "btn danger";
+    var saved = 0, lastFile = "";
+    try {
+      for (var i = 1; i <= count; i++) {
+        if (burstAbort) break;
+        st.textContent = "正在连拍第 " + i + " / " + count + " 张…";
+        var r = await A.api.post(apiBase() + "/capture", { camera_source: src, split: state.split });
+        saved++;
+        lastFile = r.file;
+        st.textContent = "已采集 " + saved + " / " + count + " 张（最新：" + r.file + "）";
+        if (i < count && !burstAbort) {
+          await new Promise(function (resolve) { setTimeout(resolve, Math.round(intervalS * 1000)); });
+        }
+      }
+      await refreshCurrentDataset();
+      await loadImages(false);
+      if (lastFile) openImage(lastFile);
+      A.ok("连续采集完成：共保存 " + saved + " 张图片", "#yoloAlert");
+    } catch (e) {
+      A.setAlert("#yoloAlert", "连拍中断（已保存 " + saved + " 张）：" + e.message, "err");
+    } finally {
+      burstRunning = false;
+      burstAbort = false;
+      btn.textContent = "连续定时采集";
+      btn.className = "btn subtle";
+      st.textContent = saved ? ("上次连拍已保存 " + saved + " 张") : "";
+    }
   });
 
   A.click("btnImport", function () {
@@ -696,12 +801,12 @@
 
   A.click("btnCapture", function () {
     if (!state.ds) { A.toast("先选择或新建一个数据集", "warn"); return; }
-    var idx = parseInt(A.el("camIndex").value, 10) || 0;
+    var src = selectedCamSource();
     var mask = document.createElement("div");
     mask.className = "modal-mask";
     mask.innerHTML =
       '<div class="notify-modal" style="width:min(780px,100%)" role="dialog" aria-modal="true">' +
-        '<div class="notify-head"><span class="notify-title">采集预览 · 摄像头 ' + idx + '</span></div>' +
+        '<div class="notify-head"><span class="notify-title">采集预览 · ' + A.esc(src) + '</span></div>' +
         '<div style="padding:10px 18px">' +
           '<img id="capPreview" alt="摄像头预览" ' +
           'style="width:100%;border-radius:8px;background:#111;min-height:180px" /></div>' +
@@ -713,22 +818,24 @@
     var img = mask.querySelector("#capPreview");
     var okBtn = mask.querySelector("[data-ok]");
     var hint = mask.querySelector(".notify-title");
-    var candidates = [idx, 0, 1, 2, 3].filter(function (v, i, a) { return a.indexOf(v) === i; });
+    var candidates = [src, "0", "1", "2", "3"].filter(function (v, i, a) { return a.indexOf(v) === i; });
     var attempt = 0;
     function close() {
       img.src = "";
       if (mask.parentNode) mask.parentNode.removeChild(mask);
     }
     function loadStream() {
-      hint.textContent = "采集预览 · 摄像头 " + candidates[attempt];
-      img.src = "/api/camera/stream?index=" + candidates[attempt] + "&t=" + Date.now();
+      var cur = String(candidates[attempt]);
+      hint.textContent = "采集预览 · " + cur;
+      var q = /^\d+$/.test(cur) ? ("index=" + cur) : ("device=" + encodeURIComponent(cur));
+      img.src = "/api/camera/stream?" + q + "&t=" + Date.now();
     }
     img.onload = function () {
       okBtn.disabled = false;
-      if (candidates[attempt] !== idx) {
-        A.el("camIndex").value = candidates[attempt];
-        A.store("yolo.cam", candidates[attempt]);
-        hint.textContent = "摄像头 " + idx + " 不可用，已自动切到 index=" + candidates[attempt];
+      if (candidates[attempt] !== src) {
+        if (A.el("camSource")) A.el("camSource").value = String(candidates[attempt]);
+        A.store("yolo.cam_source", String(candidates[attempt]));
+        hint.textContent = "原相机不可用，已自动切到 " + candidates[attempt];
       }
     };
     img.onerror = function () {
@@ -840,14 +947,24 @@
 
   A.click("btnReloadModels", function () { loadModels(); });
 
+  A.click("btnApplySortingModel", function () {
+    A.action(async function () {
+      var model = A.el("valModel").value;
+      if (!model) throw new Error("请先在下拉框选择一个训练好的 .pt 模型");
+      await A.saveConfig({ sorting: { yolo_model: model } });
+      A.ok("已将包裹分拣 YOLO 检测模型设为：" + model, "#yoloAlert");
+    }, "#yoloAlert");
+  });
+
   A.click("btnValidate", function () {
     A.action(async function () {
       var model = A.el("valModel").value;
-      if (!model) throw new Error("还没有 .pt 模型，先在下方训练一次");
+      if (!model) throw new Error("还没有 .pt 模型，请先在上方第 4 步「训练 YOLO 模型」生成");
       A.store("yolo.model", model);
       var payload = { model: model, conf: parseFloat(A.el("valConf").value) || 0.25 };
       var src = A.el("valSource").value;
       if (src === "camera") {
+        payload.camera_source = selectedCamSource();
         payload.camera_index = parseInt(A.el("camIndex").value, 10) || 0;
       } else {
         if (!state.ds) throw new Error("先选择数据集");
@@ -899,7 +1016,35 @@
         A.el("llmState").textContent = "已标注 " + r.count + " 个框（提示词：" + (r.prompt || "") + "）";
         A.ok("本地 DINO 预标注完成：" + r.count + " 个框", "#yoloAlert");
         var cur = state.current;
+        await refreshCurrentDataset();
         await openImage(cur);
+      } finally {
+        overlay.hidden = true;
+        btn.disabled = false;
+      }
+    }, "#yoloAlert");
+  });
+
+  A.click("btnDinoBatch", function () {
+    A.action(async function () {
+      if (!state.ds) throw new Error("请先选择数据集");
+      if (!state.ds.classes.length) throw new Error("数据集还没有类别，请先添加类别");
+      var overlay = A.el("aiOverlay"), btn = A.el("btnDinoBatch");
+      overlay.hidden = false;
+      btn.disabled = true;
+      A.el("llmState").textContent = "正在批量自动标注未标注图片，请稍候…";
+      try {
+        var r = await A.api.post("/api/ai/grounding-batch", {
+          dataset: state.ds.name, split: state.split, only_unlabeled: true,
+          conf: parseFloat(A.el("dinoConf").value) || 0.2,
+          max_boxes: parseInt(A.el("dinoMax").value, 10) || 100
+        }, 600000);
+        var msg = r.total === 0 ? "当前没有待标注的空白图片" :
+          ("批量预标注完成：成功 " + r.succeeded + " / " + r.total + " 张，共标出 " + r.total_boxes + " 个框");
+        A.el("llmState").textContent = msg;
+        A.ok(msg, "#yoloAlert");
+        await refreshCurrentDataset();
+        await loadImages(true);
       } finally {
         overlay.hidden = true;
         btn.disabled = false;

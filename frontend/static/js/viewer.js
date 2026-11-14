@@ -167,6 +167,23 @@
   A.click("btnReload", function () {
     loadDatasets().catch(function (e) { A.toast(e.message, "err"); });
   });
+  function exportCurrentViewer(mode) {
+    if (!S.repo) { A.toast("请先选择数据集", "warn"); return; }
+    var url = "/api/dataset/export?repo_id=" + encodeURIComponent(S.repo) + "&mode=" + encodeURIComponent(mode || "all");
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = S.repo.replace(/[^A-Za-z0-9._-]+/g, "_") + (mode === "videos" ? "_videos.zip" : "_full.zip");
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    A.ok("正在打包下载：" + S.repo + "（" + (mode === "videos" ? "仅视频 MP4" : "完整数据+视频") + "）", "#viewerAlert");
+  }
+  if (A.el("btnExportViewerAll")) {
+    A.click("btnExportViewerAll", function () { exportCurrentViewer("all"); });
+  }
+  if (A.el("btnExportViewerVid")) {
+    A.click("btnExportViewerVid", function () { exportCurrentViewer("videos"); });
+  }
   A.click("btnPlay", function () {
     S.playing=true;
     vids().forEach(function (v) {

@@ -146,6 +146,77 @@ def locate(depth,rgb_shape,detections,c,*,min_points=25):
     return output
 
 
+def locate_rgb_only(rgb_shape,detections,c,default_height_m=.035):
+    """无深度相机（纯 RGB 俯视平面几何）定位：利用相机→工作台外参与桌面平面方程，通过射线-平面求交计算包裹三维坐标与尺寸。"""
+    validate_calibration(c)
+    Kr,dr,rw,rh=camera(c['rgb'],'RGB')
+    if tuple(rgb_shape[:2])!=(rh,rw):raise SortingError('当前图像分辨率与标定不一致，请重新标定或恢复原分辨率')
+    h_pkg=float(default_height_m)
+    if not .005<=h_pkg<=.35:raise SortingError('默认包裹高度应在 0.005～0.35 米')
+    T_ws_rgb=transform(c['workspace_from_depth'])@np.linalg.inv(transform(c['rgb_from_depth']))
+    cam_pos=T_ws_rgb[:3,3];R_ws_rgb=T_ws_rgb[:3,:3]
+    plane=np.asarray(c['table_plane'],dtype=float);n=plane[:3];d_plane=plane[3]
+    def intersect(uv_pts,z_offset):
+        rays_cam=unproject(uv_pts,np.ones(len(uv_pts)),c['rgb'])
+        dirs_ws=rays_cam@R_ws_rgb.T
+        denom=dirs_ws@n
+        num=z_offset-(cam_pos@n+d_plane)
+        valid_ray=np.abs(denom)>1e-4
+        t=np.where(valid_ray,num/np.where(valid_ray,denom,1.0),-1.0)
+        pts=cam_pos+t[:,None]*dirs_ws
+        return pts,t
+    output=[]
+    for index,det in enumerate(detections):
+        box=array(det['xyxy'],(4,),'YOLO 检测框');x1,y1,x2,y2=box
+        if x2<=x1 or y2<=y1:continue
+        cx,cy=(x1+x2)*.5,(y1+y2)*.5
+        uv_5=np.array([[cx,cy],[x1,y1],[x2,y1],[x2,y2],[x1,y2]],dtype=float)
+        pts_mid,t_mid=intersect(uv_5[:1],h_pkg*.5)
+        pts_base,t_base=intersect(uv_5[1:],0.0)
+        result=dict(det,id=str(index),valid=False,mode='rgb_only')
+        if t_mid[0]<=.1 or t_mid[0]>3.0 or not inside(pts_mid[0],c['workspace_bounds']):
+            result['error']='纯 RGB 桌面平面投射超出工作区';output.append(result);continue
+        target=pts_mid[0].copy();target[2]=h_pkg*.5
+        if np.all((t_base>.1)&(t_base<3.0)):
+            span=np.ptp(pts_base,axis=0)
+            ext=[float(np.clip(span[0],.04,.45)),float(np.clip(span[1],.04,.45)),h_pkg]
+        else:ext=[.10,.10,h_pkg]
+        result.update(valid=True,xyz_m=target.tolist(),height_m=h_pkg,extent_m=ext,
+                      points=0,calibration_id=fingerprint(c))
+        output.append(result)
+    return output
+
+
+def segment_distance(p1,p2,q1,q2):
+    """计算两条三维线段 (p1,p2) 与 (q1,q2) 之间的最短欧氏距离（米）。"""
+    p1=np.asarray(p1,float);p2=np.asarray(p2,float);q1=np.asarray(q1,float);q2=np.asarray(q2,float)
+    u=p2-p1;v=q2-q1;w=p1-q1
+    a=float(u@u);b=float(u@v);c=float(v@v);d=float(u@w);e=float(v@w)
+    def pt_seg(pt,s1,s2):
+        sv=s2-s1;sn=float(sv@sv)
+        t=0.0 if sn<1e-12 else float(np.clip(((pt-s1)@sv)/sn,0.0,1.0))
+        return float(np.linalg.norm(pt-(s1+t*sv)))
+    best=min(pt_seg(p1,q1,q2),pt_seg(p2,q1,q2),pt_seg(q1,p1,p2),pt_seg(q2,p1,p2))
+    denom=a*c-b*b
+    if denom>1e-10:
+        s=(b*e-c*d)/denom;t=(a*e-b*d)/denom
+        if 0.0<=s<=1.0 and 0.0<=t<=1.0:
+            best=min(best,float(np.linalg.norm((p1+s*u)-(q1+t*v))))
+    return best
+
+
+def arm_chain_min_distance(chain_left,chain_right):
+    """计算左臂连杆折线点列与右臂连杆折线点列在工作台坐标系下的最小间距（米）。"""
+    L=np.asarray(chain_left,float).reshape(-1,3);R=np.asarray(chain_right,float).reshape(-1,3)
+    if len(L)==0 or len(R)==0:return float('inf')
+    if len(L)==1 and len(R)==1:return float(np.linalg.norm(L[0]-R[0]))
+    best=float(np.min(np.linalg.norm(L[:,None,:]-R[None,:,:],axis=2)))
+    for i in range(len(L)-1):
+        for j in range(len(R)-1):
+            best=min(best,segment_distance(L[i],L[i+1],R[j],R[j+1]))
+    return best
+
+
 def verify_push(before,after,training_region):
     if before['name']!=after['name'] or not after.get('valid'):raise SortingError('推拢后没有重新确认同一类别目标')
     if abs(after['height_m']-before['height_m'])>.08:raise SortingError('推拢后形状变化过大，需要重新检测')

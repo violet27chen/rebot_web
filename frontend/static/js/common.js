@@ -13,11 +13,11 @@
     { id: "connect", label: "设备连接与校准", href: "/p/connect", ico: "plug" },
     { id: "camera",  label: "摄像头",     href: "/p/camera",  ico: "camera" },
     { id: "teleop",  label: "遥操作",     href: "/p/teleop",  ico: "gamepad" },
-    { id: "eval",    label: "策略评估",   href: "/p/eval",    ico: "chart" },
     { id: "dataset", label: "训练数据",   href: "/p/dataset", ico: "database" },
     { id: "viewer",  label: "数据查看",   href: "/p/viewer",  ico: "play" },
-    { id: "train",   label: "模型训练",   href: "/p/train",   ico: "cpu" },
     { id: "yolo",    label: "视觉数据",   href: "/p/yolo",    ico: "grid" },
+    { id: "train",   label: "模型训练",   href: "/p/train",   ico: "cpu" },
+    { id: "eval",    label: "策略评估",   href: "/p/eval",    ico: "chart" },
     { id: "setup",   label: "环境安装",   href: "/p/setup",   ico: "package" },
     { id: "logs",    label: "日志与命令", href: "/p/logs",    ico: "terminal" }
   ];

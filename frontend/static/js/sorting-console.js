@@ -7,12 +7,15 @@
     function parsed(v,name,fallback){if(!v.trim())return fallback;try{return JSON.parse(v);}catch(e){throw new Error(name+'不是有效 JSON');}}
     function apply(c){var s=c.sorting||{},safe=s.safety||{},cyc=s.cycle||{};
       A.el('sortingYolo').value=s.yolo_model||'';A.el('sortingDevice').value=s.device||'cuda';A.el('sortingConfidence').value=s.confidence===undefined?.6:s.confidence;
+      if(A.el('sortingUseDepth'))A.el('sortingUseDepth').value=String(s.use_depth!==false);
+      if(A.el('sortingDefaultHeight'))A.el('sortingDefaultHeight').value=s.default_height_m===undefined?0.035:s.default_height_m;
       A.el('sortingSkills').value=pretty(s.skills||[]);A.el('sortingTorque').value=pretty(safe.torque_limits_nm);A.el('sortingLimits').value=pretty(safe.joint_limits_rad);
       A.el('sortingVelocity').value=safe.max_velocity_rad_s||.25;A.el('sortingClearance').value=safe.clearance_m||.10;A.el('sortingPush').value=safe.max_push_m||.12;
+      if(A.el('sortingMinArmDist'))A.el('sortingMinArmDist').value=safe.min_arm_distance_m||.12;
       if(A.el('sortingCycleArm'))A.el('sortingCycleArm').value=cyc.arm||'auto';
       if(A.el('sortingLeftDir'))A.el('sortingLeftDir').value=pretty(cyc.left_direction||[-1,0,0]).replace(/\s+/g,' ');
     }
-    function read(){var r={};['Yolo','Device','Confidence','Skills','Torque','Limits','Velocity','Clearance','Push','CycleArm','LeftDir'].forEach(function(k){var el=A.el('sorting'+k);if(el)r[k]=el.value;});return r;}
+    function read(){var r={};['Yolo','Device','Confidence','UseDepth','DefaultHeight','Skills','Torque','Limits','Velocity','Clearance','Push','MinArmDist','CycleArm','LeftDir'].forEach(function(k){var el=A.el('sorting'+k);if(el)r[k]=el.value;});return r;}
     function invalidate(){plan=null;A.el('sortingExecute').disabled=true;A.el('sortingPlanDetails').hidden=true;}
     function selected(){return scene&&(scene.targets||[]).find(function(t){var n=A.q('input[name="sorting-target"]:checked');return n&&t.id===n.value;});}
     function status(r){calibrationId=r.calibration_id;A.el('sortingCalibId').textContent='标定版本：'+calibrationId;A.el('sortingState').textContent=r.ready?'配置齐全 · 等待预演':'配置未完成';
@@ -33,8 +36,10 @@
       var cfg=await A.api.get('/api/config');apply(cfg);
       A.autosave.bind({id:'sorting:skills-control',section:'sorting',root:'#sortingConfig',read:read,apply:apply,
         write:async function(delta,full){var p={},map={Yolo:'yolo_model',Device:'device',Confidence:'confidence'};Object.keys(map).forEach(function(k){if(k in delta)p[map[k]]=k==='Confidence'?Number(full[k]):full[k];});
+          if('UseDepth' in delta)p.use_depth=(full.UseDepth==='true');
+          if('DefaultHeight' in delta)p.default_height_m=Number(full.DefaultHeight);
           if('Skills' in delta){p.skills=parsed(full.Skills,'技能清单',[]);if(!Array.isArray(p.skills))throw new Error('技能清单需要 JSON 数组');}
-          var safe={},sm={Torque:'torque_limits_nm',Limits:'joint_limits_rad',Velocity:'max_velocity_rad_s',Clearance:'clearance_m',Push:'max_push_m'};Object.keys(sm).forEach(function(k){if(k in delta)safe[sm[k]]=(k==='Torque'||k==='Limits')?parsed(full[k],k==='Torque'?'力矩上限':'关节限位',null):Number(full[k]);});if(Object.keys(safe).length)p.safety=safe;
+          var safe={},sm={Torque:'torque_limits_nm',Limits:'joint_limits_rad',Velocity:'max_velocity_rad_s',Clearance:'clearance_m',Push:'max_push_m',MinArmDist:'min_arm_distance_m'};Object.keys(sm).forEach(function(k){if(k in delta)safe[sm[k]]=(k==='Torque'||k==='Limits')?parsed(full[k],k==='Torque'?'力矩上限':'关节限位',null):Number(full[k]);});if(Object.keys(safe).length)p.safety=safe;
           if('CycleArm' in delta||'LeftDir' in delta){var cyc={};if('CycleArm' in delta)cyc.arm=full.CycleArm;if('LeftDir' in delta)cyc.left_direction=parsed(full.LeftDir,'向左方向向量',[-1,0,0]);p.cycle=cyc;}
           invalidate();await A.saveConfig({sorting:p});await refresh();}});
       [['sortingScanLeft','left'],['sortingScanRight','right'],['sortingScanTop',null]].forEach(function(pair){var el=A.el(pair[0]);if(!el)return;click(pair[0],async function(){var r=await post('label/scan',pair[1]?{side:pair[1]}:{});var codes=(r.codes||[]).map(function(c){return c.text+'('+c.type+')';}).join(', ')||'无条码';A.el('sortingScanResult').textContent=(pair[1]==='left'?'左腕':pair[1]==='right'?'右腕':'俯视')+'：状态='+r.status+' · 清晰度='+Math.round(r.sharpness)+' · 结果='+codes;});});

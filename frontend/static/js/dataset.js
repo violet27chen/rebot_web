@@ -22,6 +22,36 @@
     }
   }
 
+  var cachedDatasets = [];
+
+  function triggerDatasetExport(repoId, mode) {
+    var rid = String(repoId || "").trim();
+    if (!rid) {
+      var f = A.el("recordForm");
+      rid = (f && f.elements.repo_id && f.elements.repo_id.value.trim()) ||
+        (cachedDatasets[0] && cachedDatasets[0].repo_id) || "";
+    }
+    if (!rid) {
+      A.toast("请先指定或选择一个已录制数据集", "warn");
+      return;
+    }
+    var url = "/api/dataset/export?repo_id=" + encodeURIComponent(rid) + "&mode=" + encodeURIComponent(mode || "all");
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = rid.replace(/[^A-Za-z0-9._-]+/g, "_") + (mode === "videos" ? "_videos.zip" : "_full.zip");
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    A.ok("正在打包下载数据集 " + rid + "（" + (mode === "videos" ? "仅视频 MP4" : "完整数据+视频") + "）", "#dsAlert");
+  }
+
+  if (A.el("btnExportCurrentAll")) {
+    A.click("btnExportCurrentAll", function () { triggerDatasetExport("", "all"); });
+  }
+  if (A.el("btnExportCurrentVid")) {
+    A.click("btnExportCurrentVid", function () { triggerDatasetExport("", "videos"); });
+  }
+
   async function loadDatasets(quiet) {
     var body = A.q("#dsTable tbody");
     A.showLoading(body, {
@@ -31,6 +61,7 @@
     A.el("dsRoot").textContent = "目录读取中…";
     try {
       var r = await A.api.get("/api/datasets");
+      cachedDatasets = r.datasets || [];
       A.el("dsRoot").textContent = "目录 " + r.root;
       if (!r.datasets.length) {
         A.loadEmpty(body, "数据集目录为空",
@@ -43,6 +74,8 @@
               A.esc(d.episodes) + "</td><td>" + A.esc(d.size_mb) + " MB</td><td class=\"muted\">" +
               A.esc(d.path) + "</td><td><div class=\"actions\">" +
               '<button class="btn sm primary" data-view="' + A.esc(d.repo_id) + '">网页查看</button>' +
+              '<button class="btn sm subtle" data-export-all="' + A.esc(d.repo_id) + '">导出数据+视频</button>' +
+              '<button class="btn sm subtle" data-export-vid="' + A.esc(d.repo_id) + '">仅导出视频</button>' +
               '<button class="btn sm subtle" data-viz="' + A.esc(d.repo_id) + '">可视化</button>' +
               '<button class="btn sm" data-replay="' + A.esc(d.repo_id) + '">回放</button>' +
               '<button class="btn sm" data-fill="' + A.esc(d.path) + '">用作训练目录</button>' +
@@ -53,6 +86,16 @@
       A.qa("#dsTable [data-view]").forEach(function (b) {
         b.addEventListener("click", function () {
           location.href = "/p/viewer?repo=" + encodeURIComponent(b.dataset.view);
+        });
+      });
+      A.qa("#dsTable [data-export-all]").forEach(function (b) {
+        b.addEventListener("click", function () {
+          triggerDatasetExport(b.dataset.exportAll, "all");
+        });
+      });
+      A.qa("#dsTable [data-export-vid]").forEach(function (b) {
+        b.addEventListener("click", function () {
+          triggerDatasetExport(b.dataset.exportVid, "videos");
         });
       });
       A.qa("#dsTable [data-viz]").forEach(function (b) {

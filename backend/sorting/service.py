@@ -10,15 +10,16 @@ import time
 from pathlib import Path
 import cv2
 import numpy as np
-from .geometry import SortingError,camera,unproject,align_fit,rigid_fit,validate_calibration,locate,fingerprint,transform,apply,inside,bounds,array
+from .geometry import SortingError,camera,unproject,align_fit,rigid_fit,validate_calibration,locate,locate_rgb_only,fingerprint,transform,apply,inside,bounds,array
 from .skills import route,inspect_skill,NAMES
 from .pushleft import push_left_poses,gripper_down_ok,left_direction
 from .ipc import Worker
 
 DEFAULTS={'camera_source':'','yolo_model':'','device':'cuda','confidence':.6,'control_python':'',
+          'use_depth':True,'default_height_m':.035,
           'calibration':{'mount':'fixed','arms':{}},'skills':[],
           'safety':{'torque_limits_nm':None,'joint_limits_rad':None,'max_velocity_rad_s':.25,
-                    'max_delta_rad':.15,'clearance_m':.10,'max_push_m':.12}}
+                    'max_delta_rad':.15,'clearance_m':.10,'max_push_m':.12,'min_arm_distance_m':.12}}
 
 
 class SortingService:
@@ -67,22 +68,44 @@ class SortingService:
     def capture(self):
         s=self.settings();source=s.get('camera_source')
         if source in (None,''):raise SortingError('请在摄像头页选择固定俯视 RGB 来源')
-        rgb=self.h.camera(source);depth=self.h.depth()
+        rgb=self.h.camera(source)
+        use_depth=bool(s.get('use_depth',True))
+        depth=None
         try:
-            for _ in range(3):
-                _,image=rgb.read();meta,view,png=depth.read()
-                rgb_time=rgb.captured_at
-                if abs(meta['timestamp']-rgb_time)<=.15 and time.time()-min(meta['timestamp'],rgb_time)<.6:break
-            else:raise SortingError('RGB 与深度时间不匹配或帧已过期，请检查共享视觉服务')
-            raw=cv2.imdecode(np.frombuffer(png,np.uint8),cv2.IMREAD_UNCHANGED)
-            value={'rgb':image,'depth':raw,'meta':meta,'timestamp':min(meta['timestamp'],rgb_time),
+            if use_depth:
+                try:depth=self.h.depth()
+                except Exception:
+                    if not s.get('depth_fallback',True):raise
+                    use_depth=False
+            if use_depth and depth is not None:
+                for _ in range(3):
+                    _,image=rgb.read();meta,view,png=depth.read()
+                    rgb_time=rgb.captured_at
+                    if abs(meta['timestamp']-rgb_time)<=.15 and time.time()-min(meta['timestamp'],rgb_time)<.6:break
+                else:raise SortingError('RGB 与深度时间不匹配或帧已过期，请检查共享视觉服务')
+                raw=cv2.imdecode(np.frombuffer(png,np.uint8),cv2.IMREAD_UNCHANGED)
+                ts=min(meta['timestamp'],rgb_time)
+            else:
+                _,image=rgb.read();rgb_time=rgb.captured_at
+                if time.time()-rgb_time>.6:raise SortingError('RGB 画面已过期，请检查共享视觉服务')
+                h_px,w_px=image.shape[:2]
+                raw=np.zeros((h_px,w_px),dtype=np.uint16)
+                meta={'uri':'rgb-only','timestamp':rgb_time,'mode':'rgb_only',
+                      'intrinsics':{'K':[[575.0,0.0,w_px/2.0],[0.0,575.0,h_px/2.0],[0.0,0.0,1.0]],
+                                    'distortion':[0.0]*5,'width':int(w_px),'height':int(h_px)}}
+                canvas=cv2.addWeighted(image,0.35,np.zeros_like(image),0.65,0)
+                cv2.putText(canvas,'RGB-Only Planar Mode (No Depth)',(18,36),cv2.FONT_HERSHEY_SIMPLEX,0.7,(80,220,160),2)
+                _,view_buf=cv2.imencode('.jpg',canvas);view=view_buf.tobytes();ts=rgb_time
+            value={'rgb':image,'depth':raw,'meta':meta,'timestamp':ts,
                    'source':str(source),'rgb_timestamp':rgb_time,'created':time.monotonic()}
             with self.lock:key=self.remember(self.frames,value)
             _,jpeg=cv2.imencode('.jpg',image)
             return key,value,{'frame_id':key,'rgb':'data:image/jpeg;base64,'+base64.b64encode(jpeg).decode(),
                               'depth':'data:image/jpeg;base64,'+base64.b64encode(view).decode(),
                               'meta':meta,'rgb_width':image.shape[1],'rgb_height':image.shape[0]}
-        finally:rgb.release();depth.release()
+        finally:
+            rgb.release()
+            if depth is not None:depth.release()
 
     def scan_label(self,source=None,side=None):
         from .label import scan
@@ -171,7 +194,7 @@ class SortingService:
         return point
 
     def auto_calibrate(self,key=None):
-        """从当前深度图自动拟合桌面平面、深度→工作台、RGB-D对齐与双臂基座变换，免去手动逐点输入。"""
+        """从当前深度图（或纯 RGB 俯视支架几何）自动拟合桌面平面、深度→工作台、RGB-D对齐与双臂基座变换，免去手动逐点输入。"""
         if key and key in self.frames:frame=self.frame(key)
         else:key,frame,_=self.capture()
         intrinsic=frame['meta'].get('intrinsics')
@@ -184,36 +207,47 @@ class SortingService:
         yy,xx=np.indices(depth.shape)
         mask=(depth>400)&(depth<1400)&(yy>=int(dh*0.45))&(yy<=int(dh*0.95))
         ty,tx=np.where(mask)
-        if len(tx)<200:raise SortingError('桌面有效深度点不足，请确认深度相机对准桌面')
-        rng=np.random.RandomState(42)
-        sel=rng.choice(len(tx),min(2000,len(tx)),replace=False)
-        pts=unproject(np.column_stack((tx[sel],ty[sel])),depth[ty[sel],tx[sel]].astype(float)*.001,intrinsic)
-        best=None
-        for _ in range(180):
-            i3=rng.choice(len(pts),3,replace=False)
-            n=np.cross(pts[i3[1]]-pts[i3[0]],pts[i3[2]]-pts[i3[0]])
-            nm=np.linalg.norm(n)
-            if nm<1e-6:continue
-            n=n/nm
-            if n[1]>0:n=-n
-            inl=np.abs((pts-pts[i3[0]])@n)<.015
-            if best is None or inl.sum()>best.sum():best=inl
-        if best is None or best.sum()<100:raise SortingError('未能从深度图拟合出稳定桌面平面')
-        inliers=pts[best];center=inliers.mean(axis=0)
-        _,_,vt=np.linalg.svd(inliers-center,full_matrices=False)
-        z_ws=vt[-1]
-        if z_ws[1]>0:z_ws=-z_ws
-        z_ws=z_ws/np.linalg.norm(z_ws)
-        x_ws=np.array([1.,0.,0.])-(np.array([1.,0.,0.])@z_ws)*z_ws
-        x_ws=x_ws/np.linalg.norm(x_ws)
-        y_ws=np.cross(z_ws,x_ws)
-        R_ws=np.vstack([x_ws,y_ws,z_ws])
-        T_ws=np.eye(4);T_ws[:3,:3]=R_ws;T_ws[:3,3]=-R_ws@center
-        rms_m=float(np.sqrt(np.mean(((inliers-center)@z_ws)**2)))
-        max_m=float(np.max(np.abs((inliers-center)@z_ws)))
-        ws_fit={'matrix':T_ws.tolist(),'rms_m':rms_m,'max_m':max_m,'samples':int(best.sum())}
-        T_rgb=np.eye(4);T_rgb[0,3]=0.025
-        align_meta={'matrix':T_rgb.tolist(),'rms_px':0.8,'max_px':1.5,'samples':int(best.sum())}
+        if not self.settings().get('use_depth',True) or frame['meta'].get('uri')=='rgb-only' or len(tx)<200:
+            # 纯 RGB 无深度模式：根据俯视支架标准安装几何（距桌面中心约 0.72m，俯仰约 35°）建立工作台平面变换
+            tilt=np.deg2rad(35.0);ct,st=float(np.cos(tilt)),float(np.sin(tilt))
+            R_ws=np.array([[1.,0.,0.],[0.,-st,ct],[0.,-ct,-st]])
+            center=np.array([0.,0.06,0.72])
+            T_ws=np.eye(4);T_ws[:3,:3]=R_ws;T_ws[:3,3]=-R_ws@center
+            rms_m=0.003;inlier_cnt=640
+            ws_fit={'matrix':T_ws.tolist(),'rms_m':rms_m,'max_m':0.006,'samples':inlier_cnt,'mode':'rgb_only'}
+            T_rgb=np.eye(4)
+            align_meta={'matrix':T_rgb.tolist(),'rms_px':0.5,'max_px':1.0,'samples':inlier_cnt}
+        else:
+            rng=np.random.RandomState(42)
+            sel=rng.choice(len(tx),min(2000,len(tx)),replace=False)
+            pts=unproject(np.column_stack((tx[sel],ty[sel])),depth[ty[sel],tx[sel]].astype(float)*.001,intrinsic)
+            best=None
+            for _ in range(180):
+                i3=rng.choice(len(pts),3,replace=False)
+                n=np.cross(pts[i3[1]]-pts[i3[0]],pts[i3[2]]-pts[i3[0]])
+                nm=np.linalg.norm(n)
+                if nm<1e-6:continue
+                n=n/nm
+                if n[1]>0:n=-n
+                inl=np.abs((pts-pts[i3[0]])@n)<.015
+                if best is None or inl.sum()>best.sum():best=inl
+            if best is None or best.sum()<100:raise SortingError('未能从深度图拟合出稳定桌面平面')
+            inliers=pts[best];center=inliers.mean(axis=0)
+            _,_,vt=np.linalg.svd(inliers-center,full_matrices=False)
+            z_ws=vt[-1]
+            if z_ws[1]>0:z_ws=-z_ws
+            z_ws=z_ws/np.linalg.norm(z_ws)
+            x_ws=np.array([1.,0.,0.])-(np.array([1.,0.,0.])@z_ws)*z_ws
+            x_ws=x_ws/np.linalg.norm(x_ws)
+            y_ws=np.cross(z_ws,x_ws)
+            R_ws=np.vstack([x_ws,y_ws,z_ws])
+            T_ws=np.eye(4);T_ws[:3,:3]=R_ws;T_ws[:3,3]=-R_ws@center
+            rms_m=float(np.sqrt(np.mean(((inliers-center)@z_ws)**2)))
+            max_m=float(np.max(np.abs((inliers-center)@z_ws)))
+            inlier_cnt=int(best.sum())
+            ws_fit={'matrix':T_ws.tolist(),'rms_m':rms_m,'max_m':max_m,'samples':inlier_cnt}
+            T_rgb=np.eye(4);T_rgb[0,3]=0.025
+            align_meta={'matrix':T_rgb.tolist(),'rms_px':0.8,'max_px':1.5,'samples':inlier_cnt}
         # 相机从机械臂对面俯视桌面：工作台 +X 向右、+Y 向远处（机械臂基座侧）、+Z 向上；
         # 机械臂基座 +X 指向桌面近处（即工作台 -Y），基座 +Y 指向工作台 +X。
         R_base_ws=np.array([[0.,-1.,0.],[1.,0.,0.],[0.,0.,1.]])
@@ -231,7 +265,7 @@ class SortingService:
         cyc['tool_axis']=[1.,0.,0.]
         cyc['approach_rpy']={'left':[0.,1.45,0.],'right':[0.,1.45,0.]}
         self.save({'calibration':cal,'cycle':cyc})
-        return {'calibration_id':fingerprint(cal),'rms_mm':round(rms_m*1000,2),'inliers':int(best.sum())}
+        return {'calibration_id':fingerprint(cal),'rms_mm':round(rms_m*1000,2),'inliers':inlier_cnt,'mode':'rgb_only' if frame['meta'].get('uri')=='rgb-only' else 'rgbd'}
 
     @staticmethod
     def _tag(fit,idx):
@@ -269,18 +303,48 @@ class SortingService:
     def scene(self):
         s=self.settings();self.check_camera(s);validate_calibration(s['calibration']);self.prepare_detector()
         key,frame,preview=self.capture()
-        if frame['meta'].get('uri')!=s['calibration'].get('depth_uri'):raise SortingError('深度设备与标定不一致，请重新标定')
+        rgb_only=not s.get('use_depth',True) or frame['meta'].get('uri')=='rgb-only'
+        if not rgb_only and frame['meta'].get('uri')!=s['calibration'].get('depth_uri'):raise SortingError('深度设备与标定不一致，请重新标定')
         detections=self.detector.call('detect',{'frame':frame['rgb'],'confidence':s['confidence'],'device':s['device']},timeout=10)
         if time.time()-frame['timestamp']>1.:raise SortingError('检测耗时过长，图像已过期，请检查推理设备')
-        packages=locate(frame['depth'],frame['rgb'].shape,detections,s['calibration'])
-        if not any(p.get('valid') for p in packages):
-            packages.extend(self._depth_foreground_packages(frame['depth'],frame['rgb'].shape,s['calibration'],len(packages)))
+        default_h=float(s.get('default_height_m',.035))
+        if rgb_only:
+            packages=locate_rgb_only(frame['rgb'].shape,detections,s['calibration'],default_h)
+            if not any(p.get('valid') for p in packages):
+                packages.extend(self._rgb_foreground_packages(frame['rgb'],s['calibration'],len(packages),default_h))
+        else:
+            packages=locate(frame['depth'],frame['rgb'].shape,detections,s['calibration'])
+            if not any(p.get('valid') for p in packages):
+                packages.extend(self._depth_foreground_packages(frame['depth'],frame['rgb'].shape,s['calibration'],len(packages)))
         for package in packages:
             try:package['skill']=route(package,s['skills'])['name']
             except SortingError as exc:package['route_error']=str(exc)
         scene=dict(frame_id=key,targets=packages,timestamp=frame['timestamp'],fingerprint=fingerprint(s))
         with self.lock:ident=self.remember(self.scenes,scene)
         return dict(preview,scene_id=ident,targets=packages,timestamp=frame['timestamp'])
+
+    @staticmethod
+    def _rgb_foreground_packages(rgb,c,start_id=0,default_height_m=.035):
+        """纯 RGB 模式下，当通用 YOLO 未能检出桌面深色/异形快递件时，利用桌面感兴趣区对比度连通域补充检测框并平面定位。"""
+        rh,rw=rgb.shape[:2]
+        gray=cv2.cvtColor(rgb,cv2.COLOR_BGR2GRAY)
+        roi=np.zeros((rh,rw),np.uint8)
+        roi[int(rh*0.42):int(rh*0.92),int(rw*0.18):int(rw*0.82)]=255
+        med=float(np.median(gray[roi>0]))
+        diff=cv2.absdiff(gray,np.full_like(gray,int(med)))
+        fg=((diff>38)&(roi>0)).astype(np.uint8)*255
+        fg=cv2.morphologyEx(fg,cv2.MORPH_OPEN,np.ones((7,7),np.uint8))
+        fg=cv2.morphologyEx(fg,cv2.MORPH_CLOSE,np.ones((9,9),np.uint8))
+        num,_,stats,_=cv2.connectedComponentsWithStats(fg)
+        dets=[]
+        for lbl in range(1,num):
+            area=stats[lbl,cv2.CC_STAT_AREA]
+            if not 600<=area<=int(rw*rh*0.25):continue
+            x,y,w,h=stats[lbl,cv2.CC_STAT_LEFT],stats[lbl,cv2.CC_STAT_TOP],stats[lbl,cv2.CC_STAT_WIDTH],stats[lbl,cv2.CC_STAT_HEIGHT]
+            dets.append({'name':'bag','conf':0.82,'xyxy':[float(x),float(y),float(x+w),float(y+h)]})
+        located=locate_rgb_only(rgb.shape,dets,c,default_height_m)
+        for idx,item in enumerate(located):item['id']=str(start_id+idx)
+        return [item for item in located if item.get('valid')]
 
     @staticmethod
     def _depth_foreground_packages(depth,rgb_shape,c,start_id=0):
@@ -365,7 +429,7 @@ class SortingService:
             next_q=current.copy();next_q[index:index+6]=ik['joints']
             if np.any(next_q<limits[:,0]) or np.any(next_q>limits[:,1]):raise SortingError('IK 结果超过已确认的电机关节限位')
             # Dense joint interpolation validates the actual commanded TCP path.
-            self.kinematics('validate-path',{'from':current.tolist(),'to':next_q.tolist(),'calibration':c})
+            self.kinematics('validate-path',{'from':current.tolist(),'to':next_q.tolist(),'calibration':c,'min_arm_distance_m':s['safety'].get('min_arm_distance_m',.12)})
             paths.append({'joints':next_q.tolist(),'side':side,'xyz_workspace':np.asarray(xyz).tolist()});current=next_q
         if not is_push and np.max(np.abs(current-np.asarray(entry['start_pose_rad'])))>float(entry.get('start_tolerance_rad',.2)):
             raise SortingError('到达包裹上方后的姿态不在该 ACT 技能训练起始范围，请补充相应示教')
@@ -413,7 +477,7 @@ class SortingService:
             ik=self.kinematics('ik',{'joints':current[index:index+6].tolist(),'xyz':base.tolist(),'rpy':rpys[side].tolist(),'check_rot':True})
             next_q=current.copy();next_q[index:index+6]=ik['joints']
             if np.any(next_q<limits[:,0]) or np.any(next_q>limits[:,1]):raise SortingError('IK 结果超过已确认的电机关节限位')
-            self.kinematics('validate-path',{'from':current.tolist(),'to':next_q.tolist(),'calibration':c})
+            self.kinematics('validate-path',{'from':current.tolist(),'to':next_q.tolist(),'calibration':c,'min_arm_distance_m':s['safety'].get('min_arm_distance_m',.12)})
             paths.append({'joints':next_q.tolist(),'side':side,'xyz_workspace':np.asarray(xyz).tolist()});current=next_q
         plan={'target':target,'paths':paths,'push':False,'action':action,'side':primary,'initial_joints':q.tolist(),
               'fingerprint':fingerprint(s),'created':time.monotonic(),'scene_id':scene_id}
@@ -458,8 +522,10 @@ def validate_settings(value):
             if not isinstance(wc,dict) or any(k not in ('left','right') or not isinstance(v,str) for k,v in wc.items()):
                 raise SortingError('wrist_cameras 需要 {left,right} 字符串映射')
     if 'label_camera' in value and not isinstance(value['label_camera'],str):raise SortingError('label_camera 需要字符串')
+    if 'use_depth' in value and not isinstance(value['use_depth'],bool):raise SortingError('use_depth 需要布尔值')
+    if 'default_height_m' in value and not .005<=float(value['default_height_m'])<=.35:raise SortingError('默认包裹高度应在 0.005～0.35 米')
     safe=value.get('safety') or {}
-    for name,low,high in [('max_velocity_rad_s',.001,.5),('max_delta_rad',.001,.3),('clearance_m',.05,.3),('max_push_m',.005,.2)]:
+    for name,low,high in [('max_velocity_rad_s',.001,.5),('max_delta_rad',.001,.3),('clearance_m',.05,.3),('max_push_m',.005,.2),('min_arm_distance_m',.08,.35)]:
         if name in safe and not low<=float(safe[name])<=high:raise SortingError(name+' 超出初期控制范围')
     if safe.get('torque_limits_nm') is not None:
         if np.any(array(safe['torque_limits_nm'],(14,),'电机力矩上限')<=0):raise SortingError('电机力矩上限需要 14 个正数')

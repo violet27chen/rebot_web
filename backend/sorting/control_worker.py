@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 import numpy as np
 from .ipc import worker_pipes
-from .geometry import array,SortingError
+from .geometry import array,apply,transform,arm_chain_min_distance,SortingError
 from ..motor_mode import ensure_mode_checked
 
 
@@ -31,9 +31,10 @@ def main():
     from reBotArm_control_py.kinematics.inverse_kinematics import solve_ik,IKParams
     from backend.telemetry_client import FeedbackPublisher
     model=load_robot_model(str(sdk/'urdf/DM/urdf/ReBot_Arm_DM.urdf'));data=model.createData();frame=model.getFrameId('end_link')
+    chain_frames=[model.getFrameId(n) for n in ('base_link','link2','link3','link4','link5','link6','end_link')]
     hardware=yaml.safe_load((sdk/'config/rebotarm_dm.yaml').read_text());sessions=[];cfg=None
     initialized=False
-    target=None;command_at=web_at=time.monotonic();fault='';armed=False;publisher=FeedbackPublisher();last_publish=0
+    target=None;safe_q=None;contact_ticks=0;command_at=web_at=time.monotonic();fault='';armed=False;publisher=FeedbackPublisher();last_publish=0
     register_index=0;last_register=0;last_states=None;closing=False
     def states():
         result=[]
@@ -48,9 +49,27 @@ def main():
     def fk(q):
         pin.forwardKinematics(model,data,model_q(q));pin.updateFramePlacements(model,data)
         return data.oMf[frame].translation.tolist()
+    def fk_chain(q):
+        pin.forwardKinematics(model,data,model_q(q));pin.updateFramePlacements(model,data)
+        return np.array([data.oMf[f].translation.copy() for f in chain_frames])
+    def inter_arm_distance(q_vec):
+        if cfg is None or len(q_vec)<14:return float('inf')
+        arms_cal=((cfg.get('calibration') or {}).get('arms') or {})
+        chains={}
+        try:
+            for idx,arm in enumerate(cfg.get('arms') or []):
+                side=arm.get('side')
+                if side not in ('left','right') or side not in arms_cal:return float('inf')
+                T_ws_base=np.linalg.inv(transform(arms_cal[side]['base_from_workspace']))
+                chains[side]=apply(T_ws_base,fk_chain(q_vec[idx*7:idx*7+6]))
+        except Exception:
+            return float('inf')
+        if 'left' not in chains or 'right' not in chains:return float('inf')
+        return arm_chain_min_distance(chains['left'],chains['right'])
     def snapshot():
         return {'joints':[s.pos for s in last_states],'torques':[s.torq for s in last_states],
                 'fault':fault,'held':not armed,'timestamp':time.time(),
+                'arm_distance_m':round(inter_arm_distance(np.array([s.pos for s in last_states])),4) if last_states else None,
                 'tcp':[fk([s.pos for s in last_states][i:i+7]) for i in range(0,len(last_states),7)]}
     try:
         while True:
@@ -60,21 +79,45 @@ def main():
                     try:web_at=float(Path(cfg['heartbeat_path']).read_text())
                     except (OSError,ValueError):web_at=0
                     last_states=states();q=np.array([s.pos for s in last_states]);velocity=np.array([s.vel for s in last_states])
+                    meas_torq=np.array([s.torq for s in last_states]);limits_nm=np.asarray(cfg['torque_limits_nm'],dtype=float)
+                    tau_grav=np.zeros(len(q))
+                    for i in range(0,len(q),7):tau_grav[i:i+6]=pin.computeGeneralizedGravity(model,model.createData(),model_q(q[i:i+7]))[:6]
                     reason=''
                     if max(s.t_mos for s in last_states)>80:reason='电机温度超过 80°C'
-                    if np.any(np.abs([s.torq for s in last_states])>np.asarray(cfg['torque_limits_nm'])*1.1):reason='实测力矩看门狗触发'
+                    if np.any(np.abs(meas_torq)>limits_nm*1.1):reason='实测力矩看门狗触发'
                     if began-web_at>1.5:reason='浏览器心跳中断，已冻结目标'
                     if armed and began-command_at>.5:reason='推理/轨迹指令过期，已冻结目标'
-                    if reason and not fault:fault=reason;armed=False;target=q.copy()
+                    # 实时双臂连杆三维间距防撞保护（50Hz）
+                    min_dist=max(.08,float(cfg.get('min_arm_distance_m',.12))-.005)
+                    d_meas=inter_arm_distance(q);d_cmd=inter_arm_distance(target)
+                    if min(d_meas,d_cmd)<min_dist:
+                        reason=f'双臂防撞保护触发（连杆最小间距 {min(d_meas,d_cmd)*100:.1f}cm < {min_dist*100:.1f}cm），已紧急冻结并回退'
+                    elif d_meas>=min_dist+.01:
+                        safe_q=q.copy()
+                    # 实时接触碰撞/受阻检测（当双臂或外部障碍发生碰撞导致外力矩激增或关节受阻时立即卸力）
+                    if armed and not reason:
+                        arm_mask=np.array([i%7!=6 for i in range(len(q))],dtype=bool)
+                        ext_torq=np.abs(meas_torq-tau_grav)
+                        jammed=(np.abs(target-q)>.09)&(np.abs(velocity)<.08)&(ext_torq>np.maximum(1.5,limits_nm*.45))
+                        impact=ext_torq>np.maximum(2.2,limits_nm*.72)
+                        if np.any((jammed|impact)&arm_mask):contact_ticks+=1
+                        else:contact_ticks=max(0,contact_ticks-1)
+                        if contact_ticks>=3:
+                            reason='检测到机械臂接触碰撞或外力受阻，已紧急卸除推进力并转为重力补偿保持'
+                    else:contact_ticks=0
+                    if reason and not fault:
+                        fault=reason;armed=False
+                        if safe_q is not None and d_meas<min_dist:
+                            step=np.clip(safe_q-q,-.04,.04);target=q+step
+                        else:target=q.copy()
                     # Fresh register transactions detect a silent feedback channel;
                     # cached MotorState alone has no timestamp in motorbridge 0.5.
                     if began-last_register>.05:
                         all_motors=[m for _,_,ms in sessions for m in ms]
                         if all_motors[register_index].get_register_u32(10,timeout_ms=50)!=int(Mode.MIT):raise RuntimeError('CAN 控制模式发生改变')
                         register_index=(register_index+1)%len(all_motors);last_register=began
-                    kp=np.array(cfg['kp']);kd=np.array(cfg['kd']);tau=kp*(target-q)-kd*velocity
-                    for i in range(0,len(q),7):tau[i:i+6]+=pin.computeGeneralizedGravity(model,model.createData(),model_q(q[i:i+7]))[:6]
-                    tau=np.clip(tau,-np.array(cfg['torque_limits_nm']),np.array(cfg['torque_limits_nm']))
+                    kp=np.array(cfg['kp']);kd=np.array(cfg['kd']);tau=kp*(target-q)-kd*velocity+tau_grav
+                    tau=np.clip(tau,-limits_nm,limits_nm)
                     for motor,t in zip([m for _,_,ms in sessions for m in ms],tau):motor.send_mit(0,0,0,0,float(t))
                     if began-last_publish>1/30:
                         last_publish=began
@@ -103,7 +146,7 @@ def main():
                             except RuntimeError:
                                 if attempt==29:raise
                                 time.sleep(.03)
-                        target=np.array([s.pos for s in last_states])
+                        target=np.array([s.pos for s in last_states]);safe_q=target.copy()
                         if np.max(abs(target-array(p['seed_rad'],(size,),'预演起始姿态')))>.1:raise RuntimeError('机械臂姿态已改变，请重新预演')
                         cfg=p
                         # Init targets are measured, gravity is computed before enable.
@@ -125,6 +168,11 @@ def main():
                         if time.monotonic()-web_at>1.5:raise RuntimeError('缺少实时浏览器心跳')
                         q=np.array([s.pos for s in last_states]);next_q=bounded_target(q,p['joints'],cfg['joint_limits_rad'],cfg['max_delta_rad'])
                         if np.max(abs(next_q-target))>cfg['max_velocity_rad_s']*max(.02,time.monotonic()-command_at)*1.5:raise RuntimeError('目标速度超过限制')
+                        min_dist=max(.08,float(cfg.get('min_arm_distance_m',.12))-.005)
+                        d_next=inter_arm_distance(next_q)
+                        if d_next<min_dist:
+                            fault=f'双臂防撞保护拦截：目标姿态连杆间距 {d_next*100:.1f}cm 小于安全阈值，已紧急冻结';armed=False;target=q.copy()
+                            raise RuntimeError(fault)
                         target=next_q;command_at=time.monotonic();armed=True;value=True
                     elif method=='ik':
                         i=0 if p['side']=='left' else 7;seed=model_q([s.pos for s in last_states][i:i+7])

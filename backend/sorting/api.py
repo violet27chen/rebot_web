@@ -134,12 +134,16 @@ def attach(app,h):
                 return {'ok':True,'value':state}
             h.prepare_control()
             service.control=Worker(service.control_python(),'backend.sorting.control_worker',h.root,env=h.environment())
-            safety=copy.deepcopy(service.settings()['safety']);safety.update(arms=h.arms(),heartbeat_path=str(session['heartbeat']),seed_rad=session['proposal']['initial_joints'])
+            safety=copy.deepcopy(service.settings()['safety'])
+            safety.update(arms=h.arms(),heartbeat_path=str(session['heartbeat']),seed_rad=session['proposal']['initial_joints'],
+                          calibration=copy.deepcopy(service.settings()['calibration']))
             return {'ok':True,'value':service.control.call('init',safety,timeout=60)}
         if method=='scene':return {'ok':True,'value':service.scene()}
         if method=='plan':return {'ok':True,'value':service.plan(value['scene_id'],value['target_id'],value.get('action'))}
         if method=='label':return {'ok':True,'value':service.scan_label(value.get('source'),value.get('side'))}
-        if method=='validate':return {'ok':True,'value':service.kinematics('validate-path',{'from':value['from'],'to':value['to'],'calibration':service.settings()['calibration']})}
+        if method=='validate':
+            s=service.settings()
+            return {'ok':True,'value':service.kinematics('validate-path',{'from':value['from'],'to':value['to'],'calibration':s['calibration'],'min_arm_distance_m':s['safety'].get('min_arm_distance_m',.12)})}
         if method=='frames':
             result={}
             for feature,source in (value.get('camera_map') or session['proposal']['skill']['camera_map']).items():

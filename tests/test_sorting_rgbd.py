@@ -12,8 +12,8 @@ import cv2
 import numpy as np
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from backend.sorting.geometry import (SortingError,apply,unproject,rigid_fit,align_fit,locate,
-                                      validate_calibration,verify_push,fingerprint)
+from backend.sorting.geometry import (SortingError,apply,unproject,rigid_fit,align_fit,locate,locate_rgb_only,
+                                      segment_distance,arm_chain_min_distance,validate_calibration,verify_push,fingerprint)
 from backend.sorting.skills import NAMES,DIRECTIONS,route,inspect_skill,action_to_raw,raw_observation
 from backend.sorting.control_worker import bounded_target
 from backend.sorting.service import validate_settings
@@ -73,6 +73,20 @@ class GeometryTests(unittest.TestCase):
     def test_fingerprint_changes_when_intrinsics_or_arm_frame_changes(self):
         c=calibration();old=fingerprint(c);c['arms']['left']['base_from_workspace'][0][3]=.5
         self.assertNotEqual(old,fingerprint(c))
+    def test_locate_rgb_only_planar_ray_intersection(self):
+        c=calibration()
+        targets=locate_rgb_only((60,80,3),[dict(name='box',conf=.9,xyxy=[30,20,50,40])],c,default_height_m=.04)
+        self.assertTrue(targets[0]['valid'])
+        self.assertEqual(targets[0]['mode'],'rgb_only')
+        np.testing.assert_allclose(targets[0]['xyz_m'],[0.0,0.0,0.02],atol=1e-6)
+        self.assertAlmostEqual(targets[0]['height_m'],.04,places=6)
+    def test_multi_link_arm_chain_min_distance_detects_crossing_and_proximity(self):
+        # Two skew segments crossing near midpoint even though endpoints are far apart
+        d_cross=segment_distance([-0.2,0.0,0.1],[0.2,0.0,0.1],[0.0,-0.2,0.12],[0.0,0.2,0.12])
+        self.assertAlmostEqual(d_cross,0.02,places=6)
+        left_chain=[[-0.25,0.34,0.0],[-0.20,0.20,0.18],[-0.04,0.05,0.12]]
+        right_chain=[[0.25,0.34,0.0],[0.20,0.20,0.18],[0.04,0.05,0.12]]
+        self.assertAlmostEqual(arm_chain_min_distance(left_chain,right_chain),0.08,places=6)
 
 
 class SkillTests(unittest.TestCase):
