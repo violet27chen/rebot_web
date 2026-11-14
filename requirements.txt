@@ -1,0 +1,30 @@
+# 机械臂一键操控与训练平台 · Python 依赖（Ubuntu 22.04 / Windows 10+ 均可）
+# 建议在所选 conda 虚拟环境中安装：
+#   pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+# Windows 双击 start_windows.bat 或运行 python start.py（缺依赖会自动补齐）。
+# 注意：若环境注入了不可用的代理，
+#   Ubuntu/macOS : unset HTTPS_PROXY HTTP_PROXY https_proxy http_proxy ALL_PROXY all_proxy
+#   Windows CMD  : set HTTPS_PROXY=  && set HTTP_PROXY=
+# 清华 simple 索引偶发返回空版本列表时改用官方源：-i https://pypi.org/simple
+#
+# Windows 与 Ubuntu 均支持本机 Web 服务和硬件控制；Windows 使用设备驱动提供的 COM 端口。
+
+# Web 服务与串口（必需）
+fastapi>=0.110
+uvicorn>=0.27
+pyserial>=3.5
+websockets>=12.0        # WebSocket 日志流：训练 Loss / 终端输出实时推送，缺了会 404
+python-multipart>=0.0.9 # FastAPI 文件上传接口（导入后端时必需，缺了直接启动失败）
+
+# 摄像头真实 MJPEG 画面 / OpenCV 训练引擎（必需）
+opencv-python>=4.8
+numpy>=1.24
+PyYAML>=6.0             # Official B601-DM hardware configuration for controlled shutdown
+
+# LeRobot 本体与硬件插件（按 Seeed 文档，由「环境安装」页面一键安装）
+# git clone https://v4.gh-proxy.org/https://github.com/Seeed-Projects/lerobot.git
+# pip install -e ./lerobot
+# pip install lerobot-teleoperator-rebot-arm-102 lerobot-robot-seeed-b601 motorbridge
+
+# YOLO 训练引擎（仅在页面选择 YOLO 时需要，可点「安装所选引擎依赖」自动装）
+# ultralytics>=8.2

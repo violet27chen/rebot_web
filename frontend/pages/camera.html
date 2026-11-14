@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>摄像头 · reBot 控制台</title>
+  <link rel="icon" type="image/svg+xml" href="/static/img/logo.svg">
+  <link rel="stylesheet" href="/static/css/style.css?v=3.4.1-20261114-2">
+</head>
+<body>
+  <div id="shell"></div>
+  <main id="page" class="page">
+    <div id="camAlert" class="alert" role="alert"></div>
+    <div class="section-toolbar">
+      <div><h2>相机设备</h2><p>连接、预览和配置每一路相机</p></div>
+      <div class="btn-row">
+        <button class="btn subtle" id="btnDiscover" data-app-nofb>扫描设备</button>
+        <button class="btn primary" id="btnAddCam" data-app-nofb>添加相机</button>
+        <button class="btn primary" id="btnSaveCam" data-app-nofb hidden disabled>重试保存</button>
+      </div>
+    </div>
+    <div class="section-toolbar">
+      <div class="camera-summary"><span class="badge" id="camState">正在读取…</span><span class="save-state" id="saveState">配置自动保存</span></div>
+      <div class="btn-row"><button class="btn subtle sm" id="btnPreviewAll" data-app-nofb>全部预览</button><button class="btn subtle sm" id="btnPauseAll" data-app-nofb>暂停全部</button></div>
+    </div>
+    <div class="camera-workspace" id="camGrid" aria-label="相机预览"></div>
+    <section class="card rgbd-panel" id="rgbdCalibration" aria-labelledby="rgbdTitle">
+      <div class="card-h"><div><h2 id="rgbdTitle">固定俯视 · RGB-D 空间标定</h2><p class="hint">先建立像素、工作台和双臂基座的对应关系。此处采样与求解均不驱动电机。</p></div><span class="badge" id="rgbdState">尚未标定</span></div>
+      <div class="alert" id="rgbdAlert" role="alert"></div>
+      <div id="rgbdConfig">
+        <div class="row"><div class="field"><label for="rgbdSource">深度相机对应的 RGB 设备</label><select id="rgbdSource"><option value="">请选择固定俯视彩色相机</option></select></div><div class="field"><label for="rgbdPython">运动学 / CAN 的 Python（可留空自动选择）</label><input id="rgbdPython" placeholder="优先使用项目 .venv-sorting/bin/python"></div></div>
+        <details class="advanced-settings"><summary>工作台坐标与有效范围（米）</summary><p class="hint">工作台 Z 轴垂直向上；X/Y 方向自行定义并保持一致。不要填入未经测量的机械臂基座变换。</p><div class="row"><div class="field"><label for="rgbdBounds">工作区范围 [[X下限,上限],[Y下限,上限],[Z下限,上限]]</label><textarea id="rgbdBounds" rows="3" placeholder="填写实际测量范围"></textarea></div><div class="field"><label for="rgbdPlane">桌面平面 [0,0,1,-桌面Z]</label><textarea id="rgbdPlane" rows="3" placeholder="桌面作为 Z=0 时：[0,0,1,0]"></textarea></div></div></details>
+      </div>
+      <ol class="rgbd-steps"><li><strong>获取几何参数</strong><span>冻结 RGB / 原始深度，读取 SDK 当前分辨率的深度内参。</span></li><li><strong>采集对应点</strong><span>同一物理点在两幅图中点击，填写实测工作台 / 基座坐标。</span></li><li><strong>求解并验证</strong><span>检查误差，确认对齐、工作台和左右臂变换。</span></li></ol>
+      <div class="btn-row"><button class="btn primary" id="rgbdCapture" type="button">冻结一组 RGB / 深度</button><button class="btn" id="rgbdDepth" type="button" disabled>读取深度内参</button><span class="hint" id="rgbdFrameInfo">尚未冻结画面</span></div>
+      <div class="rgbd-views" id="rgbdViews" hidden><figure><figcaption>RGB · 点击同一物理特征点</figcaption><canvas id="rgbdRgb" aria-label="RGB 标定采样" tabindex="0"></canvas><output id="rgbdRgbUv">未选点</output></figure><figure><figcaption>原始深度的预览 · 点击稳定表面</figcaption><canvas id="rgbdDepthView" aria-label="深度标定采样" tabindex="0"></canvas><output id="rgbdDepthUv">未选点</output></figure></div>
+      <details class="advanced-settings" open><summary>RGB 内参 · 棋盘标定</summary><p class="hint">至少八张覆盖画面不同位置、不同倾角的棋盘。每次移动棋盘后重新冻结，内角点数量不含外边框。</p><div class="row" id="rgbdBoardInputs"><div class="field"><label for="rgbdColumns">横向内角点</label><input id="rgbdColumns" type="number" min="3" max="15" value="9"></div><div class="field"><label for="rgbdRows">纵向内角点</label><input id="rgbdRows" type="number" min="3" max="15" value="6"></div><div class="field"><label for="rgbdSquare">方格边长（米）</label><input id="rgbdSquare" type="number" min="0.005" max="0.1" step="0.001" value="0.025"></div></div><div class="btn-row"><button class="btn" id="rgbdBoard" type="button">采集当前棋盘</button><button class="btn" id="rgbdSolveRgb" type="button">求解 RGB 内参</button></div></details>
+      <details class="advanced-settings" open><summary>对应点 · 对齐与三维坐标</summary><p class="hint">RGB-D 对齐至少八对；三维变换至少六对，覆盖平面且包含不同高度。工作台与基座均填写同一物理点的坐标；读取 FK 返回官方模型 end_link，只有该参考点与采样点重合时才能配对。</p><div class="row" id="rgbdPointInputs"><div class="field"><label for="rgbdWorld">实测工作台 X, Y, Z（米，可选）</label><input id="rgbdWorld" placeholder="x, y, z"></div><div class="field"><label for="rgbdSide">基座对应臂</label><select id="rgbdSide"><option value="left">左从臂</option><option value="right">右从臂</option></select></div><div class="field"><label for="rgbdBase">基座 X, Y, Z（米，可选）</label><input id="rgbdBase" placeholder="x, y, z"></div></div><div class="btn-row"><button class="btn" id="rgbdFk" type="button">读取当前 end_link 坐标</button><button class="btn primary" id="rgbdPoint" type="button">记录对应点</button><button class="btn subtle" id="rgbdReset" type="button">清空采样并作废标定</button></div><p class="hint" id="rgbdSamples"></p></details>
+      <div class="rgbd-fit-grid" id="rgbdFits"></div>
+      <p class="hint" id="rgbdCalibrationId"></p>
+    </section>
+    <details class="card advanced-settings">
+      <summary>高级诊断与深度相机</summary>
+      <p class="hint">多路 USB 相机建议使用 MJPG。预览按设备配置采集，网页最多显示 15 帧/秒；采集任务使用保存的帧率。</p>
+      <div id="deviceReport" class="hint"></div>
+      <h3>LeRobot SDK 扫描</h3>
+      <p class="hint">SDK 扫描会暂停网页预览，详细输出可在顶部任务日志查看。</p>
+      <div class="btn-row"><button class="btn subtle" id="btnScanOpencv">OpenCV</button><button class="btn subtle" id="btnScanRealsense">RealSense</button><button class="btn subtle" id="btnScanOrbbec">Orbbec</button></div>
+      <h3>Orbbec SDK 抓图</h3>
+      <p class="hint">UVC 彩色画面直接在上方添加相机；深度 SDK 抓图请先暂停该设备预览。</p>
+      <div class="row"><div class="field"><label for="orbPwd">权限安装密码</label><input type="password" id="orbPwd" autocomplete="off"></div><div class="btn-row"><button class="btn subtle" id="btnOrbUdev">安装权限</button><button class="btn" id="btnOrbSnap">SDK 抓图</button></div></div>
+      <div class="hint" id="orbHint"></div><img id="orbImg" hidden style="max-width:100%;border-radius:8px;margin-top:12px" alt="Orbbec SDK 彩色图像">
+    </details>
+    <dialog class="camera-dialog" id="cameraDialog" aria-labelledby="cameraDialogTitle">
+      <form id="cameraForm">
+        <h2 id="cameraDialogTitle">添加相机</h2>
+        <div class="alert" id="dialogAlert" role="alert"></div>
+        <div class="field"><label for="camName">相机名称</label><input id="camName" required maxlength="60" placeholder="例如：顶部 / 左腕 / 右腕"></div>
+        <div class="field"><label for="devicePicker">已发现的视频设备</label><select id="devicePicker"></select><span class="hint">仅列出可以采集图像的节点，自动排除元数据节点。</span></div>
+        <div class="field"><label for="camSource">设备编号或稳定路径</label><input id="camSource" required placeholder="/dev/video4 或 /dev/v4l/by-path/…"><span class="hint">稳定路径可避免重启或插拔后编号变化。</span></div>
+        <div class="row"><div class="field"><label for="camWidth">宽度</label><input id="camWidth" type="number" min="16" max="7680" required value="640"></div><div class="field"><label for="camHeight">高度</label><input id="camHeight" type="number" min="16" max="4320" required value="480"></div><div class="field"><label for="camFps">采集 FPS</label><input id="camFps" type="number" min="1" max="120" required value="30"></div></div>
+        <div class="row"><div class="field"><label for="camType">后端</label><select id="camType"><option value="opencv">OpenCV · USB 彩色</option><option value="realsense">RealSense SDK</option><option value="orbbec">Orbbec SDK</option></select></div><div class="field"><label for="camFourcc">传输格式</label><input id="camFourcc" maxlength="4" minlength="4" required value="MJPG"></div></div>
+        <label class="check"><input id="camPreview" type="checkbox" checked>打开本页时自动预览</label>
+        <div class="btn-row dialog-actions"><button type="button" class="btn subtle" id="btnCancelCamera" data-app-nofb>关闭</button><button type="submit" class="btn primary" data-app-nofb>完成</button></div>
+      </form>
+    </dialog>
+  </main>
+  <script src="/static/js/common.js?v=3.4.1-20261114-2"></script>
+  <script src="/static/js/autosave.js?v=3.4.1-20261114-2"></script>
+  <script src="/static/js/rgbd-calibration.js?v=3.5.0-20261114-4"></script>
+  <script src="/static/js/camera.js?v=3.4.1-20261114-2"></script>
+</body>
+</html>

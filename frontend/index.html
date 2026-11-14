@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>启动向导 · 机械臂一键操控与训练平台</title>
+  <link rel="icon" type="image/svg+xml" href="/static/img/logo.svg">
+  <link rel="stylesheet" href="/static/css/style.css?v=3.4.1-20261114-2">
+</head>
+<body>
+  <div id="shell"></div>
+
+  <div id="page" class="page wizard">
+    <div class="wizard-head">
+      <h1>启动向导</h1>
+      <p>需完成「运行环境（选择虚拟环境，或直接复用已安装的 LeRobot）→ 串口检查/授权 → 连接主从臂」才能进入主界面。Ubuntu 通过 sudo chmod 授权 /dev 串口，Windows 直接使用 COM 端口、无需授权。所有操作真实执行，不使用模拟数据。</p>
+    </div>
+
+    <div id="wizAlert" class="alert"></div>
+
+    <div class="card">
+      <div class="card-h"><h2>LeRobot 安装状态</h2>
+        <span class="sub">系统里已经装好就直接复用，不重复克隆仓库和 pip 安装</span></div>
+      <div id="lerobotCard"></div>
+    </div>
+
+    <div class="steps">
+      <span class="s current" id="stepEnv">1 · 虚拟环境</span>
+      <span class="s" id="stepPerm">2 · 串口授权</span>
+      <span class="s" id="stepConn">3 · 连接机械臂</span>
+      <span class="s" id="stepDone">4 · 进入主界面</span>
+    </div>
+
+    <div class="card">
+      <div class="card-h">
+        <h2>1 · 选择 conda 虚拟环境</h2>
+        <span class="sub" id="condaState">正在检测 …</span>
+      </div>
+      <div id="envAlert" class="alert"></div>
+      <div class="row">
+        <div class="field wide">
+          <label>已有虚拟环境</label>
+          <select id="envSelect" name="env"></select>
+        </div>
+        <div class="btn-row">
+          <button class="btn primary" id="btnSelectEnv">选择并启用</button>
+          <button class="btn subtle" id="btnToggleCreateEnv" aria-expanded="false">＋ 创建新环境</button>
+          <button class="btn subtle icon" id="btnRefreshEnv" data-icon="refresh" title="重新检测虚拟环境" aria-label="重新检测虚拟环境" data-label="重新检测虚拟环境"></button>
+        </div>
+      </div>
+      <div class="hint" style="margin-top:8px">系统里已装好 LeRobot 时，用上方「直接使用」即可跳过本步；未检测到 conda 才需要一键安装 Miniforge。</div>
+      <div id="createEnvBox" hidden>
+        <hr>
+        <div class="row">
+          <div class="field narrow"><label>新环境名</label><input id="newEnvName" value="lerobot"></div>
+          <div class="field narrow"><label>Python 版本</label><input id="newEnvPy" value="3.12"></div>
+          <div class="btn-row">
+            <button class="btn primary" id="btnCreateEnv">创建虚拟环境</button>
+            <button class="btn" id="btnInstallConda">一键安装 Miniforge</button>
+            <a class="btn" href="/p/setup">环境安装</a>
+          </div>
+        </div>
+        <div id="envLocationBox"></div>
+        <div class="note" style="margin-top:14px">
+          安装 LeRobot 使用清华源与 gh-proxy：
+          <code>https://v4.gh-proxy.org/https://github.com/Seeed-Projects/lerobot.git</code>。
+          直接点页面上方检测卡里的「一键安装 LeRobot」即可，进度与日志实时显示；
+          也可到「环境安装」页面查看详细命令与安装源。安装完成后回到本页重新检测环境。
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h">
+        <h2 id="permTitle">2 · 串口授权（sudo 密码）</h2>
+        <span class="sub" id="permSub">启动时已在终端提示输入密码执行，接入新设备可在此重新授权</span>
+      </div>
+      <div id="permAlert" class="alert"></div>
+      <div class="note" id="permNote">
+        启动网页服务前必须执行：
+        <code>sudo chmod 666 /dev/ttyUSB*</code>（幻尔主臂）与
+        <code>sudo chmod 666 /dev/ttyACM*</code>（B601-DM 串口桥）。
+      </div>
+      <div class="row" style="margin-top:14px" id="permSudoRow">
+        <div class="field wide" id="sudoPwdField"><label>当前用户 sudo 密码</label>
+          <input type="password" id="sudoPwd" autocomplete="off" placeholder="输入后仅通过 stdin 传给 sudo，不保存、不回显">
+        </div>
+        <div class="btn-row">
+          <button class="btn primary" id="btnChmod">授权串口</button>
+          <button class="btn subtle" id="btnCheckPerm">检查权限</button>
+        </div>
+      </div>
+      <div class="scroll" style="margin-top:14px">
+        <table class="table" id="permTable">
+          <thead><tr><th>设备</th><th id="permModeTh">权限</th><th id="permStateTh">读写可用</th></tr></thead>
+          <tbody><tr><td colspan="3" class="muted">正在检测 …</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h">
+        <h2>3 · 选择串口连接主从臂</h2>
+        <span class="sub" id="connState">未连接</span>
+      </div>
+      <div id="connAlert" class="alert"></div>
+      <div id="dualWizBanner" class="alert info" hidden>
+        当前为双臂模式：左/右从臂与左/右主臂共四路串口需要在
+        <a href="/p/connect"><strong>设备连接与校准</strong></a> 页面连接；
+        下面这两个下拉框只用于单臂模式。
+      </div>
+      <div class="row">
+        <div class="field"><label>主臂 · 幻尔 Star Arm 102-LD</label><select id="leaderPort"></select></div>
+        <div class="field"><label>从臂 · Seeed B601-DM（串口桥）</label><select id="followerPort"></select></div>
+        <div class="btn-row">
+          <button class="btn subtle" id="btnScanPorts">扫描串口</button>
+          <button class="btn primary" id="btnConnect">连接</button>
+          <button class="btn subtle" id="btnDisconnect">断开</button>
+        </div>
+      </div>
+      <div class="note" style="margin-top:14px">连接时会真实打开并关闭两个串口做校验；若设备不存在、被占用或无权限（Windows 下多为驱动缺失或 COM 端口被占用），会明确报错，不会伪造连接成功。</div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>4 · 进入主界面</h2><span class="sub" id="readyHint">等待前置步骤完成</span></div>
+      <div class="btn-row">
+        <a class="btn primary" id="btnEnter" href="/p/home" style="pointer-events:none;opacity:.5">进入主界面</a>
+        <span class="muted" id="readyDetail"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>执行日志</h2>
+        <span class="sub"><label class="check"><input type="checkbox" id="logAuto" checked> 自动滚动</label></span>
+      </div>
+      <div class="log" id="logPanel"></div>
+    </div>
+  </div>
+
+  <script src="/static/js/common.js?v=3.4.1-20261114-2"></script>
+  <script src="/static/js/autosave.js?v=3.4.1-20261114-2"></script>
+  <script src="/static/js/wizard.js?v=3.4.1-20261114-2"></script>
+</body>
+</html>

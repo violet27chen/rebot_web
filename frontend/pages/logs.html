@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>日志与命令 · 机械臂控制台</title>
+  <link rel="icon" type="image/svg+xml" href="/static/img/logo.svg">
+  <link rel="stylesheet" href="/static/css/style.css?v=3.4.1-20261114-2">
+</head>
+<body>
+  <div id="shell"></div>
+  <div id="page" class="page">
+    <div id="logsAlert" class="alert"></div>
+
+    <div class="card">
+      <div class="card-h"><h2>运行状态</h2><span class="sub">来自 /api/status 的真实状态</span></div>
+      <dl class="kv" id="kvStatus"></dl>
+      <div class="btn-row" style="margin-top:14px">
+        <button class="btn danger" id="btnStop">全局急停</button>
+        <button class="btn subtle" id="btnRefresh">刷新状态</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>终端日志</h2>
+        <span class="sub"><label class="check"><input type="checkbox" id="logAuto" checked> 自动滚动</label></span>
+      </div>
+      <div class="log-tools">
+        <span>实时 WebSocket 推送 · 仅显示真实命令输出</span>
+        <span class="spacer"></span>
+        <button class="btn sm subtle" id="btnClearLog">清空显示</button>
+      </div>
+      <div class="log" id="logPanel" style="height:420px"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>Loss 指标</h2><span class="sub" id="lossCount">0 个点</span></div>
+      <div class="chart-wrap"><canvas id="lossChart"></canvas></div>
+    </div>
+  </div>
+  <script src="/static/js/common.js?v=3.4.1-20261114-2"></script>
+  <script src="/static/js/autosave.js?v=3.4.1-20261114-2"></script>
+  <script src="/static/js/logs.js?v=3.4.1-20261114-2"></script>
+</body>
+</html>

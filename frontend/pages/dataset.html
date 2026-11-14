@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>训练数据 · 机械臂控制台</title>
+  <link rel="icon" type="image/svg+xml" href="/static/img/logo.svg">
+  <link rel="stylesheet" href="/static/css/style.css?v=3.4.1-20261114-2">
+</head>
+<body>
+  <div id="shell"></div>
+  <div id="page" class="page">
+    <div id="dsAlert" class="alert"></div>
+
+    <details class="card advanced-settings" id="collectionPlan" hidden>
+      <summary>双臂采集编排</summary><p class="hint">按阶段提示示教节奏；推拢、翻盒、翻袋请分别采集与训练。</p>
+      <div class="row"><div class="field"><label for="planTemplate">协作模板</label><select id="planTemplate"></select></div><div class="field"><label>阶段计时</label><div class="note" id="phaseClock">未开始</div></div><div class="btn-row"><button class="btn" id="btnPhaseTimer" data-app-nofb>开始计时</button><button class="btn subtle" id="btnExportPlan" data-app-nofb>导出编排</button></div></div>
+      <label class="check"><input type="checkbox" id="applyTask">使用模板任务描述（自动更新采集参数）</label><p class="hint" id="planMeta"></p>
+      <div class="scroll"><table class="table" id="phaseTable"><thead><tr><th>阶段</th><th>时长</th><th>左臂</th><th>右臂</th><th>同步</th></tr></thead><tbody></tbody></table></div>
+    </details>
+    <div class="card">
+      <div class="card-h"><h2>采集数据</h2><span class="sub">lerobot-record · 需先连接主从臂</span></div>
+      <form id="recordForm">
+        <div class="row">
+          <div class="field wide"><label>数据集 repo_id</label><input name="repo_id"></div>
+          <div class="field"><label>剧集数</label><input name="num_episodes" type="number"></div>
+          <div class="field wide"><label>任务描述</label><input name="single_task"></div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <div class="field"><label>单集时长 (s)</label><input name="episode_time_s" type="number"></div>
+          <div class="field"><label>重置时长 (s)</label><input name="reset_time_s" type="number"></div>
+          <label class="check"><input type="checkbox" name="resume"> 续录</label>
+          <label class="check"><input type="checkbox" name="push_to_hub"> 上传 Hub</label>
+          <label class="check"><input type="checkbox" name="auto_home" checked> 结束回零并卸力</label>
+        </div>
+        <div class="btn-row" style="margin-top:14px">
+          <button class="btn subtle" type="submit">保存参数</button>
+          <button class="btn primary" type="button" id="btnRecord">开始采集</button>
+          <button class="btn danger" type="button" id="btnStop" title="录制中会自动发送 ESC，保存并编码当前剧集后再退出">停止录制</button>
+        </div>
+      </form>
+      <hr>
+      <div class="card-h"><h2 style="font-size:13.5px">录制键盘控制</h2><span class="sub">发送给机器人主机上的录制窗口</span></div>
+      <div class="btn-row">
+        <button class="btn primary" id="keyRight">→ 下一集</button>
+        <button class="btn subtle" id="keyLeft">← 重录本集</button>
+        <button class="btn danger" id="keyEsc">ESC 结束会话</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>网页可视化（录制时看相机）</h2><span class="sub" id="vizWebState">未启动</span></div>
+      <div class="btn-row">
+        <button class="btn primary" type="button" id="btnVizWeb">启动并打开</button>
+        <button class="btn subtle" type="button" id="btnVizWebStop">关闭</button>
+      </div>
+      <div class="note" style="margin-top:12px">
+        启动后会在新标签页打开 Rerun 网页查看器；采集时 front / side 两路画面和机械臂状态都显示在里面
+        （采集参数里的「显示数据」需勾选）。录制期间网页「摄像头」页打不开相机是正常的——相机被录制进程独占。
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>已录制数据集</h2><span class="sub" id="dsRoot"></span></div>
+      <div class="btn-row" style="margin-bottom:12px">
+        <button class="btn subtle" id="btnReloadDs">刷新列表</button>
+        <a class="btn" href="/p/train">前往训练</a>
+      </div>
+      <div class="scroll">
+        <table class="table" id="dsTable">
+          <thead><tr><th>repo_id</th><th>剧集</th><th>大小</th><th>路径</th><th>操作</th></tr></thead>
+          <tbody><tr><td colspan="5" class="muted">正在读取 …</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>合并数据集</h2><span class="sub">把多次录制 / 多个数据集合成一个训练用</span></div>
+      <div class="btn-row">
+        <button class="btn primary" type="button" id="btnMerge">选择数据集合并</button>
+      </div>
+      <div class="hint" style="margin-top:8px">合并要求相机 / 关节结构一致；合并后的数据集会出现在上面的列表里。</div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>可视化与回放</h2><span class="sub">lerobot-dataset-viz / lerobot-replay</span></div>
+      <form id="vizForm">
+        <div class="row">
+          <div class="field wide"><label>数据集 repo_id</label><input name="repo_id" id="vizRepo"></div>
+          <div class="field narrow"><label>剧集索引</label><input name="episode_index" id="vizEp" type="number" value="0"></div>
+          <div class="btn-row">
+            <button class="btn primary" type="button" id="btnViz">可视化</button>
+            <button class="btn subtle" type="button" id="btnReplay">回放</button>
+          </div>
+        </div>
+      </form>
+    </div>
+
+    <details class="card advanced-settings"><summary>已保存配置的采集命令</summary><pre class="command-preview" id="workflowCommand">正在生成…</pre></details>
+    <div class="card">
+      <div class="card-h"><h2>执行日志</h2>
+        <span class="sub"><label class="check"><input type="checkbox" id="logAuto" checked> 自动滚动</label></span>
+      </div>
+      <div class="log" id="logPanel"></div>
+    </div>
+  </div>
+
+  <!-- 固定在右侧的摄像头面板：内嵌 Rerun 网页查看器 -->
+  <div id="camDock" class="cam-dock" hidden>
+    <div class="cam-dock-h">
+      <span>摄像头 · 网页可视化</span>
+      <span class="cam-dock-actions">
+        <a id="camDockOpen" href="http://127.0.0.1:9090/" target="_blank" rel="noopener">新窗口</a>
+        <button type="button" class="btn sm subtle" id="btnCamDockClose">收起</button>
+      </span>
+    </div>
+    <iframe id="camDockFrame" src="about:blank" title="摄像头画面"></iframe>
+  </div>
+
+  <script src="/static/js/common.js?v=3.4.1-20261114-2"></script>
+  <script src="/static/js/autosave.js?v=3.4.1-20261114-2"></script>
+  <script src="/static/js/dataset.js?v=3.4.1-20261114-2"></script>
+  <script src="/static/js/collection-plan.js?v=3.4.1-20261114-2"></script>
+</body>
+</html>

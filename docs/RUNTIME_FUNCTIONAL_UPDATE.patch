@@ -1,0 +1,3426 @@
+--- a/backend/main.py
++++ b/backend/main.py
+@@ -55,7 +55,7 @@
+ 
+ from fastapi import Body, FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect
+ from fastapi.exceptions import RequestValidationError
+-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
++from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse, RedirectResponse
+ from fastapi.staticfiles import StaticFiles
+ from starlette.exceptions import HTTPException as StarletteHTTPException
+ 
+@@ -431,6 +431,9 @@
+     return None
+ 
+ 
++CONFIG_LOCK = threading.RLock()
++
++
+ def load_config() -> dict[str, Any]:
+     try:
+         if CONFIG_FILE.exists():
+@@ -442,12 +445,30 @@
+ 
+ 
+ def save_config(patch: Optional[dict]) -> dict[str, Any]:
+-    cfg = _deep_merge(load_config(), patch or {})
+-    try:
+-        CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), "utf-8")
+-    except OSError as exc:
+-        raise ApiError(f"配置写入失败：{_brief(exc)}", 500)
+-    return cfg
++    # Serialize read/merge/replace: independent autosaves must not lose each other.
++    with CONFIG_LOCK:
++        previous = load_config()
++        cfg = _deep_merge(previous, patch or {})
++        if cfg == previous and CONFIG_FILE.exists():
++            return cfg
++        temp_path = None
++        try:
++            fd, temp_path = tempfile.mkstemp(prefix=".config-", dir=str(CONFIG_FILE.parent))
++            with os.fdopen(fd, "w", encoding="utf-8") as stream:
++                json.dump(cfg, stream, ensure_ascii=False, indent=2)
++                stream.flush()
++                os.fsync(stream.fileno())
++            os.replace(temp_path, CONFIG_FILE)
++        except OSError as exc:
++            raise ApiError(f"配置写入失败：{_brief(exc)}", 500)
++        finally:
++            if temp_path and os.path.exists(temp_path):
++                os.unlink(temp_path)
++        hub = globals().get("HUB")
++        if hub:
++            hub.publish({"type": "config", "revision": CONFIG_FILE.stat().st_mtime_ns,
++                         "sections": list((patch or {}).keys())})
++        return cfg
+ 
+ 
+ # ==================================================================
+@@ -1766,7 +1787,7 @@
+     d = cfg.get("dual_arm") or {}
+     rt = str(d.get("robot_type") or "").strip()
+     tt = str(d.get("teleop_type") or "").strip()
+-    hint = ("请到「双臂协作」页面点「检测双臂类型」从当前 conda 环境里选择已注册的复合类型，"
++    hint = ("请到「设备连接与校准」页面点「检测双臂类型」从当前 conda 环境里选择已注册的复合类型，"
+             "或手动填写类型名；若插件只提供单臂类型，需要在设备插件里注册双臂复合配置后再使用。")
+     if not rt:
+         raise ApiError("双臂模式未设置复合机器人类型（robot_type）。" + hint, 400)
+@@ -1777,7 +1798,7 @@
+     missing = [k for k in need if not ports.get(k)]
+     if missing:
+         raise ApiError("双臂模式缺少串口：" + "、".join(missing) +
+-                       "。请到「双臂协作」页面扫描串口并完成四路连接", 400)
++                       "。请到「设备连接与校准」页面扫描串口并完成四路连接", 400)
+     seen: dict[str, str] = {}
+     for key in need:
+         v = ports[key]
+@@ -1838,7 +1859,7 @@
+     a = dual_side(cfg, side)
+     port = str(a.get(f"{arm}_port") or "").strip()
+     if not port:
+-        raise ApiError(f"{side}/{arm} 尚未选择串口，请到「双臂协作」页面完成连接", 400)
++        raise ApiError(f"{side}/{arm} 尚未选择串口，请到「设备连接与校准」页面完成连接", 400)
+     prefix = "--teleop" if arm == "leader" else "--robot"
+     typ, ident = a[f"{arm}_type"], a[f"{arm}_id"]
+     args = [f"{prefix}.type={typ}", f"{prefix}.port={port}", f"{prefix}.id={ident}"]
+@@ -1901,7 +1922,7 @@
+                 _, side, arm = kind.split("-")
+             return _lerobot("lerobot-calibrate") + dual_calibrate_args(cfg, side, arm)
+         if kind not in ("calibrate-leader", "calibrate-follower"):
+-            raise ApiError("当前是单臂模式，没有左右臂可分别校准；请先在「双臂协作」页开启双臂", 400)
++            raise ApiError("当前是单臂模式，没有左右臂可分别校准；请先在「设备连接与校准」页开启双臂", 400)
+         if kind == "calibrate-leader":
+             return _lerobot("lerobot-calibrate") + [
+                 f"--teleop.type={cfg['leader']['type']}", f"--teleop.port={cfg['leader']['port']}",
+@@ -2334,7 +2355,7 @@
+     if kind in HW_KINDS:
+         if dual_enabled(load_config()):
+             if not ENV.dual_connected:
+-                raise ApiError("当前是双臂模式，尚未连接双臂。请到「双臂协作」页面完成"
++                raise ApiError("当前是双臂模式，尚未连接双臂。请到「设备连接与校准」页面完成"
+                                "左从臂/左主臂/右从臂/右主臂四路串口连接", 409)
+         elif not ENV.connected:
+             raise ApiError("尚未连接主从臂。请到「串口与连接」页面分别选择主臂、从臂串口并点击连接", 409)
+@@ -2433,7 +2454,7 @@
+                         "ok" if f["dual_likely"] else "warn")
+                 if not f["dual_likely"]:
+                     HUB.log("[dual] 该数据集可能不是双臂采集；用单臂数据训练双臂策略会维度不匹配，"
+-                            "请在「双臂协作」页核对数据集特征", "warn")
++                            "请在「模型训练」页核对数据集特征", "warn")
+             else:
+                 HUB.log(f"[dual] 数据集元信息未就绪：{f.get('note', '')}", "warn")
+         except ApiError as exc:
+@@ -2898,6 +2919,8 @@
+ 
+ @app.get("/p/{name}")
+ def page(name: str):
++    if name == "dual":
++        return RedirectResponse("/p/connect", status_code=307)
+     if name not in PAGE_NAMES:
+         raise ApiError("页面不存在", 404)
+     f = PAGES_DIR / f"{name}.html"
+@@ -3059,19 +3082,39 @@
+     return load_config()
+ 
+ 
++@app.get("/api/config/revision")
++def api_config_revision():
++    return {"revision": CONFIG_FILE.stat().st_mtime_ns if CONFIG_FILE.exists() else 0}
++
++
+ @app.post("/api/config")
+ def api_save_config(payload: Optional[dict] = Body(default=None)):
+-    if payload and "cameras" in payload:
++    e = payload or {}
++    with STATE.lock:
++        old = load_config()
++        merged = _deep_merge(old, e)
++        devices_changed = any(old.get(k) != merged.get(k) for k in ('dual_arm', 'leader', 'follower'))
++        if devices_changed and STATE.running():
++            raise ApiError("任务运行期间不能修改设备配置，请先停止任务", 409)
+         try:
+-            validate_configs(payload["cameras"])
+-            with STATE.lock:
++            if "cameras" in e:
++                validate_configs(e["cameras"])
+                 if STATE.running() and STATE.job.kind in CAMERA_JOB_KINDS:
+-                    raise ApiError("相机使用中，请先结束当前任务再修改配置", 409)
+-                CAMERAS.close_all()
+-                return ok(config=save_config(payload))
++                    raise ApiError("相机使用中，修改已保留；任务结束后将自动重试", 409)
++                def profiles(cameras):
++                    return {source_key(c['index_or_path']): (c.get('width',640), c.get('height',480),
++                            c.get('fps',30), c.get('fourcc') or 'MJPG')
++                            for c in cameras if (c.get('type') or 'opencv') == 'opencv'}
++                before, after = profiles(old.get('cameras', [])), profiles(e['cameras'])
++                CAMERAS.close_devices({k for k in before.keys() | after.keys() if before.get(k) != after.get(k)})
++            config = save_config(e)
+         except CameraError as exc:
+             raise ApiError(str(exc), 400)
+-    return ok(config=save_config(payload))
++        if devices_changed:
++            ENV.connected = ENV.dual_connected = False
++            ENV.dual_ports = {}
++            HUB.state(connected=False, dual_connected=False)
++        return ok(config=config)
+ 
+ 
+ @app.get("/api/ports")
+@@ -3306,7 +3349,7 @@
+     if dual_request:
+         return _connect_dual(e)
+     if dual_enabled(load_config()):
+-        raise ApiError("当前是双臂模式，请到「双臂协作」页面完成四路串口连接；"
++        raise ApiError("当前是双臂模式，请到「设备连接与校准」页面完成四路串口连接；"
+                        "若要回到单臂，请在该页关闭双臂模式", 400)
+     lp = str(e.get("leader_port") or "").strip()
+     fp = str(e.get("follower_port") or "").strip()
+@@ -3415,6 +3458,7 @@
+     return dual_types_probe()
+ 
+ 
++@app.get("/api/commands/preview")
+ @app.get("/api/dual/preview")
+ def api_dual_preview(kind: str = "record"):
+     if kind not in DUAL_PREVIEW_KINDS:
+@@ -3430,6 +3474,7 @@
+             "error": error, "dual_arm": _dual_status(cfg)}
+ 
+ 
++@app.get("/api/datasets/features")
+ @app.get("/api/dual/features")
+ def api_dual_features(repo_id: str = "", dataset_dir: str = ""):
+     if not repo_id.strip() and not dataset_dir.strip():
+@@ -3439,8 +3484,15 @@
+ 
+ @app.post("/api/dual/mode")
+ def api_dual_mode(payload: Optional[dict] = Body(default=None)):
+-    enabled = bool((payload or {}).get("enabled"))
+-    cfg = save_config({"dual_arm": {"enabled": enabled}})
++    enabled = (payload or {}).get("enabled")
++    if not isinstance(enabled, bool):
++        raise ApiError("enabled 必须是布尔值", 400)
++    with STATE.lock:
++        if dual_enabled(load_config()) == enabled:
++            return ok(enabled=enabled, dual_arm=_dual_status(load_config()))
++        if STATE.running():
++            raise ApiError("当前有任务运行，请先停止任务再切换机器人模式", 409)
++        cfg = save_config({"dual_arm": {"enabled": enabled}})
+     # 硬件组合变了，旧的连接标记必须失效，不能沿用单臂连接去跑双臂命令
+     ENV.connected = False
+     ENV.dual_connected = False
+@@ -3463,6 +3515,7 @@
+     return start_job(f"calibrate-{side}-{arm}", f"校准{label}", load_config())
+ 
+ 
++@app.get("/api/collection/plan")
+ @app.get("/api/dual/plan")
+ def api_dual_plan_get(coordination: str = ""):
+     cfg = load_config()
+@@ -3480,6 +3533,7 @@
+                           for k, v in COORDINATION_TASKS.items()]}
+ 
+ 
++@app.post("/api/collection/plan")
+ @app.post("/api/dual/plan")
+ def api_dual_plan_save(payload: Optional[dict] = Body(default=None)):
+     """把协作编排落盘为真实 JSON 文件，供采集时按阶段执行/复盘；不产生模拟数据。"""
+--- /dev/null
++++ b/backend/camera_manager.py
+@@ -0,0 +1,248 @@
++"""Shared camera acquisition for previews and snapshots (never controls motors).
++
++One capture thread owns each physical device. Consumers receive the latest frame;
++an idle device is released automatically. LeRobot jobs take exclusive ownership
++through ``exclusive`` so previews cannot steal their UVC devices.
++"""
++from __future__ import annotations
++
++import glob
++import os
++import platform
++import re
++import struct
++import threading
++import time
++from pathlib import Path
++
++
++class CameraError(RuntimeError):
++    pass
++
++
++def source_key(source):
++    value = str(source).strip()
++    if re.fullmatch(r"\d+", value):
++        return os.path.realpath(f"/dev/video{int(value)}") if platform.system() == "Linux" else str(int(value))
++    if platform.system() == "Linux" and (re.fullmatch(r"/dev/video\d+", value) or
++            value.startswith(("/dev/v4l/by-id/", "/dev/v4l/by-path/"))):
++        resolved = os.path.realpath(value)
++        if re.fullmatch(r"/dev/video\d+", resolved):
++            return resolved
++    raise CameraError("设备必须是非负编号、/dev/videoN 或 /dev/v4l/ 下的稳定设备路径")
++
++
++def device_info(path):
++    """VIDIOC_QUERYCAP does not start a stream; metadata nodes are excluded."""
++    import fcntl
++    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
++    try:
++        buf = bytearray(104)
++        fcntl.ioctl(fd, 0x80685600, buf, True)
++        caps, device_caps = struct.unpack_from("II", buf, 84)
++        caps = device_caps if caps & 0x80000000 else caps
++        if not caps & (0x1 | 0x1000):
++            return None
++        decode = lambda raw: raw.split(b"\0", 1)[0].decode("utf-8", "replace")
++        aliases = [p for p in sorted(glob.glob('/dev/v4l/by-path/*') + glob.glob('/dev/v4l/by-id/*'))
++                   if os.path.realpath(p) == os.path.realpath(path)]
++        return {"path": path, "index": int(path.removeprefix('/dev/video')),
++                "name": decode(buf[16:48]), "bus": decode(buf[48:80]),
++                "aliases": aliases, "source": aliases[0] if aliases else path}
++    finally:
++        os.close(fd)
++
++
++def list_devices():
++    devices, errors = [], []
++    for path in sorted(glob.glob('/dev/video*'), key=lambda p: int(re.search(r'\d+$', p)[0])):
++        try:
++            info = device_info(path)
++            if info:
++                devices.append(info)
++        except OSError as exc:
++            errors.append({"path": path, "error": str(exc)})
++    return {"devices": devices, "errors": errors}
++
++
++def validate_configs(cameras):
++    if not isinstance(cameras, list):
++        raise CameraError("相机配置必须是列表")
++    names, sources = set(), set()
++    for c in cameras:
++        if not isinstance(c, dict):
++            raise CameraError("相机配置格式错误")
++        name = str(c.get('name', '')).strip()
++        if not name or name in names:
++            raise CameraError("每路相机需要一个不重复的名称")
++        names.add(name)
++        if (c.get('type') or 'opencv') != 'opencv':
++            continue
++        key = source_key(c.get('index_or_path', ''))
++        if key in sources:
++            raise CameraError(f"设备 {key} 已被另一条相机配置使用")
++        sources.add(key)
++        for k, lo, hi in [('width', 16, 7680), ('height', 16, 4320), ('fps', 1, 120)]:
++            v = c.get(k, {'width': 640, 'height': 480, 'fps': 30}[k])
++            if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi or v != int(v):
++                raise CameraError(f"{name} 的 {k} 必须是 {lo}～{hi} 的整数")
++        if not re.fullmatch(r'[A-Za-z0-9]{4}', str(c.get('fourcc') or 'MJPG')):
++            raise CameraError(f"{name} 的 FOURCC 必须是四位格式名称，例如 MJPG")
++
++
++class _Session:
++    def __init__(self, key, config, factory, idle_seconds):
++        self.key, self.config, self.factory = key, config, factory
++        self.idle_seconds = idle_seconds
++        self.condition = threading.Condition()
++        self.refs, self.last_release, self.seq = 0, time.monotonic(), 0
++        self.frame = self.jpeg = None
++        self.error, self.actual = '', {}
++        self.stop = threading.Event()
++        self.thread = threading.Thread(target=self._run, daemon=True, name=f'camera-{Path(key).name}')
++        self.thread.start()
++
++    def _run(self):
++        cap = None
++        try:
++            import cv2
++            if platform.system() == 'Linux' and self.factory is None:
++                if device_info(self.key) is None:
++                    raise CameraError(f'{self.key} 是元数据节点，不能采集图像')
++            if self.factory:
++                cap = self.factory(self.key)
++            elif platform.system() == 'Linux':
++                cap = cv2.VideoCapture(self.key, cv2.CAP_V4L2)
++            else:
++                cap = cv2.VideoCapture(int(self.key), cv2.CAP_DSHOW if platform.system() == 'Windows' else cv2.CAP_ANY)
++            if not cap.isOpened():
++                raise CameraError(f'无法打开 {self.key}，请检查设备连接、权限和占用情况')
++            # Set compression BEFORE the first read; raw YUYV exhausts a shared USB2 bus.
++            fourcc = str(self.config.get('fourcc') or 'MJPG')
++            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
++            cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(self.config.get('width') or 640))
++            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(self.config.get('height') or 480))
++            cap.set(cv2.CAP_PROP_FPS, int(self.config.get('fps') or 30))
++            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
++            code = int(cap.get(cv2.CAP_PROP_FOURCC))
++            self.actual = {'width': int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
++                           'height': int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
++                           'fps': cap.get(cv2.CAP_PROP_FPS),
++                           'fourcc': ''.join(chr((code >> 8*i) & 255) for i in range(4)).strip('\0')}
++            while not self.stop.is_set():
++                with self.condition:
++                    if not self.refs and time.monotonic() - self.last_release > self.idle_seconds:
++                        self.stop.set()
++                        break
++                valid, frame = cap.read()
++                if not valid:
++                    raise CameraError(f'{self.key} 未返回图像。检查 USB 带宽、MJPG 格式、设备占用或重新插拔相机')
++                encoded, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
++                if not encoded:
++                    raise CameraError('JPEG 编码失败')
++                with self.condition:
++                    self.frame, self.jpeg = frame, jpeg.tobytes()
++                    self.seq += 1
++                    self.condition.notify_all()
++                self.stop.wait(1 / min(15, int(self.config.get('fps') or 30)))
++        except Exception as exc:
++            with self.condition:
++                self.error = str(exc)
++                self.condition.notify_all()
++        finally:
++            if cap is not None:
++                cap.release()
++            self.stop.set()
++            with self.condition:
++                self.condition.notify_all()
++
++    def wait(self, after=0, timeout=8):
++        with self.condition:
++            ready = self.condition.wait_for(lambda: self.seq > after or self.error or self.stop.is_set(), timeout)
++            if self.error:
++                raise CameraError(self.error)
++            if not ready or self.stop.is_set():
++                raise CameraError(f'{self.key} 等待图像超时或预览已暂停；检查 USB 带宽和设备占用')
++            return self.seq, self.frame, self.jpeg
++
++
++class CameraLease:
++    def __init__(self, session):
++        self.session, self.seq, self.released = session, 0, False
++
++    def read(self):
++        self.seq, frame, _ = self.session.wait(self.seq)
++        return True, frame.copy()
++
++    def jpeg(self, fresh=False):
++        self.seq, _, jpeg = self.session.wait(self.seq if fresh else 0)
++        return jpeg
++
++    def release(self):
++        with self.session.condition:
++            if not self.released:
++                self.released = True
++                self.session.refs -= 1
++                self.session.last_release = time.monotonic()
++
++
++class CameraManager:
++    def __init__(self, factory=None, idle_seconds=1):
++        self.factory, self.idle_seconds = factory, idle_seconds
++        self.lock = threading.RLock()
++        self.sessions = {}
++        self.exclusive = False
++
++    def acquire(self, source, config=None):
++        key = source_key(source)
++        with self.lock:
++            if self.exclusive:
++                raise CameraError('相机已交给采集 / 遥操作 / 评估任务；任务结束后可重新预览')
++            session = self.sessions.get(key)
++            if session and session.stop.is_set() and session.thread.is_alive():
++                raise CameraError(f'{key} 正在释放，请稍后重试')
++            if session is None or not session.thread.is_alive():
++                session = _Session(key, config or {}, self.factory, self.idle_seconds)
++                self.sessions[key] = session
++            with session.condition:
++                session.refs += 1
++            return CameraLease(session)
++
++    def close_devices(self, sources):
++        """Reconfigure only affected devices; metadata edits keep streams running."""
++        keys = {source_key(source) for source in sources}
++        with self.lock:
++            selected = [s for key, s in self.sessions.items() if key in keys]
++            for session in selected:
++                session.stop.set()
++                with session.condition:
++                    session.condition.notify_all()
++            deadline = time.monotonic() + 4
++            for session in selected:
++                session.thread.join(max(0, deadline-time.monotonic()))
++            if any(session.thread.is_alive() for session in selected):
++                raise CameraError('相机驱动正在释放设备，请稍后重试')
++            for key in keys:
++                self.sessions.pop(key, None)
++
++    def close_all(self, exclusive=False):
++        with self.lock:
++            self.exclusive = exclusive
++            sessions = list(self.sessions.values())
++            for s in sessions:
++                s.stop.set()
++                with s.condition:
++                    s.condition.notify_all()
++            deadline = time.monotonic() + 4
++            for s in sessions:
++                s.thread.join(max(0, deadline-time.monotonic()))
++            if any(s.thread.is_alive() for s in sessions):
++                raise CameraError('相机驱动仍在等待图像，尚未释放；请稍后重试或重新插拔该相机')
++            self.sessions.clear()
++
++    def status(self):
++        with self.lock:
++            return {'exclusive': self.exclusive, 'sessions': [
++                {'device': s.key, 'clients': s.refs, 'frames': s.seq, 'error': s.error,
++                 'active': s.thread.is_alive() and not s.stop.is_set(), 'actual': s.actual}
++                for s in self.sessions.values()]}
+--- a/start.py
++++ b/start.py
+@@ -305,8 +305,8 @@
+     print(f"  主臂      : 幻尔 Star Arm 102-LD  ({backend.LEADER_TYPE})")
+     print(f"  从臂      : Seeed B601-DM         ({backend.FOLLOWER_TYPE})")
+     dual_on = backend.dual_enabled(backend.load_config())
+-    print("  双臂模式  : " + ("已开启 · 四路串口请在「双臂协作」页连接" if dual_on
+-                          else "未开启（原单臂流程）· 可在「双臂协作」页开启"))
++    print("  双臂模式  : " + ("已开启 · 四路串口请在「设备连接与校准」页连接" if dual_on
++                          else "未开启（原单臂流程）· 可在「设备连接与校准」页开启"))
+     print(f"  虚拟环境  : {backend.ENV.active_env or '尚未选择（请在启动向导中选择）'}")
+     print(f"  串口状态  : {perm_text}")
+     if IS_WINDOWS:
+--- /dev/null
++++ b/tests/test_workflow_config.py
+@@ -0,0 +1,120 @@
++import copy
++import json
++import tempfile
++import unittest
++from concurrent.futures import ThreadPoolExecutor
++from pathlib import Path
++from unittest.mock import patch
++
++from fastapi.testclient import TestClient
++import backend.main as main
++
++
++class WorkflowConfigTests(unittest.TestCase):
++    def setUp(self):
++        self.directory = tempfile.TemporaryDirectory()
++        self.path = Path(self.directory.name) / 'config.json'
++        self.path.write_text(json.dumps(main.DEFAULT_CONFIG))
++        self.file_patch = patch.object(main, 'CONFIG_FILE', self.path)
++        self.file_patch.start()
++        self.client = TestClient(main.app)
++        self.flags = (main.ENV.connected, main.ENV.dual_connected, dict(main.ENV.dual_ports))
++
++    def tearDown(self):
++        main.ENV.connected, main.ENV.dual_connected, main.ENV.dual_ports = self.flags
++        self.file_patch.stop()
++        self.directory.cleanup()
++
++    def test_parallel_partial_autosaves_preserve_all_fields(self):
++        with ThreadPoolExecutor(12) as pool:
++            list(pool.map(lambda n: main.save_config({'test_parallel': {str(n): n}}), range(40)))
++        saved = json.loads(self.path.read_text())
++        self.assertEqual(saved['test_parallel'], {str(n): n for n in range(40)})
++
++    def test_noop_write_keeps_revision_and_does_not_publish(self):
++        before = self.path.stat().st_mtime_ns
++        with patch.object(main.HUB, 'publish') as publish:
++            main.save_config({})
++        self.assertEqual(self.path.stat().st_mtime_ns, before)
++        publish.assert_not_called()
++
++    def test_changed_config_publishes_revision_without_values(self):
++        with patch.object(main.HUB, 'publish') as publish:
++            main.save_config({'llm': {'api_key': 'test-only-value'}})
++        event = publish.call_args.args[0]
++        self.assertEqual(event['type'], 'config')
++        self.assertEqual(event['sections'], ['llm'])
++        self.assertNotIn('test-only-value', json.dumps(event))
++        self.assertEqual(event['revision'], self.client.get('/api/config/revision').json()['revision'])
++
++    def test_failed_replace_preserves_previous_file(self):
++        before = self.path.read_bytes()
++        with patch.object(main.os, 'replace', side_effect=OSError('disk unavailable')):
++            with self.assertRaises(main.ApiError):
++                main.save_config({'dataset': {'single_task': 'should not replace'}})
++        self.assertEqual(self.path.read_bytes(), before)
++        self.assertEqual(list(self.path.parent.glob('.config-*')), [])
++
++    def test_old_dual_page_redirects_to_devices(self):
++        result = self.client.get('/p/dual', follow_redirects=False)
++        self.assertEqual(result.status_code, 307)
++        self.assertEqual(result.headers['location'], '/p/connect')
++
++    def test_generic_preview_supports_both_modes(self):
++        for enabled in (False, True):
++            main.save_config({'dual_arm': {'enabled': enabled}})
++            with patch.object(main, 'build_command', return_value=['verified-command']):
++                for kind in ('teleoperate', 'record', 'train', 'eval'):
++                    response = self.client.get('/api/commands/preview', params={'kind': kind})
++                    self.assertEqual(response.status_code, 200)
++                    self.assertEqual(response.json()['enabled'], enabled)
++                    self.assertIn('verified-command', response.json()['command'])
++
++    def test_idempotent_mode_update_preserves_connection(self):
++        main.save_config({'dual_arm': {'enabled': True}})
++        main.ENV.dual_connected = True
++        response = self.client.post('/api/dual/mode', json={'enabled': True})
++        self.assertEqual(response.status_code, 200)
++        self.assertTrue(main.ENV.dual_connected)
++
++    def test_busy_task_rejects_mode_and_device_edits(self):
++        main.save_config({'dual_arm': {'enabled': False}})
++        before = self.path.read_bytes()
++        with patch.object(main.STATE, 'running', return_value=True):
++            self.assertEqual(self.client.post('/api/dual/mode', json={'enabled': True}).status_code, 409)
++            self.assertEqual(self.client.post('/api/config', json={'leader': {'id': 'changed'}}).status_code, 409)
++        self.assertEqual(self.path.read_bytes(), before)
++
++    def test_device_edit_invalidates_stale_connection(self):
++        main.ENV.connected = main.ENV.dual_connected = True
++        response = self.client.post('/api/config', json={'leader': {'port': '/dev/qa-port'}})
++        self.assertEqual(response.status_code, 200)
++        self.assertFalse(main.ENV.connected)
++        self.assertFalse(main.ENV.dual_connected)
++
++    def test_camera_name_edit_preserves_capture_sessions(self):
++        camera = {'name':'top','type':'opencv','index_or_path':2,'width':640,'height':480,'fps':30,'fourcc':'MJPG'}
++        main.save_config({'cameras':[camera]})
++        with patch.object(main.CAMERAS, 'close_devices') as close:
++            response = self.client.post('/api/config', json={'cameras':[dict(camera, name='renamed')]})
++            self.assertEqual(response.status_code, 200)
++            close.assert_called_once_with(set())
++        with patch.object(main.CAMERAS, 'close_devices') as close:
++            response = self.client.post('/api/config', json={'cameras':[dict(camera, name='renamed',width=800)]})
++            self.assertEqual(response.status_code, 200)
++            close.assert_called_once_with({'/dev/video2'})
++
++    def test_dataset_features_on_training_endpoint(self):
++        root = Path(self.directory.name) / 'dataset'
++        (root / 'meta').mkdir(parents=True)
++        (root / 'meta/info.json').write_text(json.dumps({'features':{
++            'action':{'shape':[14]}, 'observation.state':{'shape':[14]},
++            'observation.images.top':{'shape':[480,640,3]}}}))
++        response = self.client.get('/api/datasets/features', params={'dataset_dir':str(root)})
++        self.assertEqual(response.status_code, 200)
++        self.assertEqual(response.json()['action_dim'], 14)
++        self.assertEqual(response.json()['cameras'], ['top'])
++
++
++if __name__ == '__main__':
++    unittest.main()
+--- a/frontend/index.html
++++ b/frontend/index.html
+@@ -5,7 +5,7 @@
+   <meta name="viewport" content="width=device-width, initial-scale=1">
+   <title>启动向导 · 机械臂一键操控与训练平台</title>
+   <link rel="icon" type="image/svg+xml" href="/static/img/logo.svg">
+-  <link rel="stylesheet" href="/static/css/style.css?v=2026111303">
++  <link rel="stylesheet" href="/static/css/style.css?v=20261113-functional-final">
+ </head>
+ <body>
+   <div id="shell"></div>
+@@ -106,7 +106,7 @@
+       <div id="connAlert" class="alert"></div>
+       <div id="dualWizBanner" class="alert info" hidden>
+         当前为双臂模式：左/右从臂与左/右主臂共四路串口需要在
+-        <a href="/p/dual"><strong>双臂协作</strong></a> 页面连接；
++        <a href="/p/connect"><strong>设备连接与校准</strong></a> 页面连接；
+         下面这两个下拉框只用于单臂模式。
+       </div>
+       <div class="row">
+@@ -137,7 +137,8 @@
+     </div>
+   </div>
+ 
+-  <script src="/static/js/common.js?v=2026111303"></script>
+-  <script src="/static/js/wizard.js?v=133"></script>
++  <script src="/static/js/common.js?v=20261113-functional-final"></script>
++  <script src="/static/js/autosave.js?v=20261113-functional-final"></script>
++  <script src="/static/js/wizard.js?v=20261113-functional-final"></script>
+ </body>
+ </html>
+--- a/frontend/pages/viewer.html
++++ b/frontend/pages/viewer.html
+@@ -4,7 +4,7 @@
+   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+   <title>数据查看 · 机械臂控制台</title>
+   <link rel="icon" href="/static/img/logo.svg">
+-  <link rel="stylesheet" href="/static/css/style.css?v=2026111303">
++  <link rel="stylesheet" href="/static/css/style.css?v=20261113-functional-final">
+ </head>
+ <body>
+   <div id="shell"></div>
+@@ -41,7 +41,8 @@
+       <canvas id="actionChart" style="width:100%;height:180px;margin-top:12px"></canvas>
+     </div>
+   </div>
+-  <script src="/static/js/common.js?v=2026111303"></script>
++  <script src="/static/js/common.js?v=20261113-functional-final"></script>
++  <script src="/static/js/autosave.js?v=20261113-functional-final"></script>
+   <script src="/static/js/viewer.js?v=133"></script>
+ </body>
+ </html>
+--- a/frontend/pages/dual.html
++++ b/frontend/pages/dual.html
+@@ -1,269 +1 @@
+-<!DOCTYPE html>
+-<html lang="zh-CN" data-theme="light">
+-<head>
+-  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+-  <title>双臂协作 · 机械臂控制台</title>
+-  <link rel="icon" type="image/svg+xml" href="/static/img/logo.svg">
+-  <link rel="stylesheet" href="/static/css/style.css?v=2026111303">
+-</head>
+-<body>
+-  <div id="shell"></div>
+-  <div id="page" class="page">
+-    <div id="dualAlert" class="alert"></div>
+-
+-    <div class="card">
+-      <div class="card-h"><h2>双臂模式</h2><span class="sub" id="dualModeState">读取中…</span></div>
+-      <label class="check"><input type="checkbox" id="dualEnabled">
+-        启用双臂（左/右从臂 + 左/右主臂，四路串口）</label>
+-      <div class="note" style="margin-top:12px">
+-        关闭时全流程与原来完全一致：单 <code>--robot.*</code> + 单 <code>--teleop.*</code>。
+-        开启后使用<strong>复合机器人</strong>，左右子臂作为同一 robot/teleop 配置的子字段，
+-        由单个 LeRobot 进程在同一个控制循环里驱动，这样两臂的 observation / action 才会落在同一帧，
+-        双臂协作数据才能被采进同一个数据集。复合类型必须由设备插件注册，页面会真实探测当前环境，
+-        没有注册类型时后端拒绝生成命令，不会假装支持。
+-      </div>
+-      <div class="dual-status-list" id="dualStatusList" style="margin-top:12px"></div>
+-      <div class="btn-row" style="margin-top:12px">
+-        <button class="btn subtle" id="btnRefreshDual">刷新状态</button>
+-        <a class="btn" href="/p/connect">单臂串口与校准</a>
+-      </div>
+-    </div>
+-
+-    <div class="card">
+-      <div class="card-h"><h2>双臂设备与连接</h2>
+-        <span class="sub" id="connHint">四路串口必须互不相同，连接时逐个真实打开验证</span></div>
+-      <div class="row">
+-        <div class="field wide"><label>复合机器人类型 robot_type（必填）</label>
+-          <input id="dualRobotType" list="robotTypeList"
+-                 placeholder="点「检测双臂类型」从当前环境选择，或手填插件注册的类型名">
+-          <datalist id="robotTypeList"></datalist></div>
+-        <div class="field wide"><label>复合主臂类型 teleop_type（遥操作 / 采集必填）</label>
+-          <input id="dualTeleopType" list="teleopTypeList"
+-                 placeholder="双臂遥操作设备对应的复合类型名">
+-          <datalist id="teleopTypeList"></datalist></div>
+-      </div>
+-      <div class="row" style="margin-top:10px">
+-        <div class="field"><label>左子臂字段名</label><input id="leftPrefix" value="left_arm"></div>
+-        <div class="field"><label>右子臂字段名</label><input id="rightPrefix" value="right_arm"></div>
+-        <div class="field"><label>协作模式</label><select id="coordination">
+-          <option value="sync">双臂同步</option>
+-          <option value="handover">双手交接</option>
+-          <option value="transport">协同搬运</option>
+-          <option value="mirror">镜像对称</option>
+-        </select></div>
+-      </div>
+-
+-      <div class="dual-arm-grid" style="margin-top:14px">
+-        <div class="dual-arm-box">
+-          <h3>左臂 · left</h3>
+-          <div class="row">
+-            <div class="field"><label>从臂串口</label><select id="left_follower" class="dual-port"></select></div>
+-            <div class="field"><label>主臂串口</label><select id="left_leader" class="dual-port"></select></div>
+-          </div>
+-          <div class="row">
+-            <div class="field"><label>从臂 type</label><input id="leftFollowerType"></div>
+-            <div class="field"><label>从臂 id</label><input id="leftFollowerId"></div>
+-          </div>
+-          <div class="row">
+-            <div class="field"><label>主臂 type</label><input id="leftLeaderType"></div>
+-            <div class="field"><label>主臂 id</label><input id="leftLeaderId"></div>
+-          </div>
+-          <div class="row"><div class="field wide"><label>从臂 CAN 适配器</label>
+-            <input id="leftCan" placeholder="damiao"></div>
+-          <div class="field"><label>夹爪力矩上限 (0-1)</label>
+-            <input id="leftGripForce" type="number" step="0.01" min="0.01" max="1" value="0.12"></div></div>
+-        </div>
+-
+-        <div class="dual-arm-box">
+-          <h3>右臂 · right</h3>
+-          <div class="row">
+-            <div class="field"><label>从臂串口</label><select id="right_follower" class="dual-port"></select></div>
+-            <div class="field"><label>主臂串口</label><select id="right_leader" class="dual-port"></select></div>
+-          </div>
+-          <div class="row">
+-            <div class="field"><label>从臂 type</label><input id="rightFollowerType"></div>
+-            <div class="field"><label>从臂 id</label><input id="rightFollowerId"></div>
+-          </div>
+-          <div class="row">
+-            <div class="field"><label>主臂 type</label><input id="rightLeaderType"></div>
+-            <div class="field"><label>主臂 id</label><input id="rightLeaderId"></div>
+-          </div>
+-          <div class="row"><div class="field wide"><label>从臂 CAN 适配器</label>
+-            <input id="rightCan" placeholder="damiao"></div>
+-          <div class="field"><label>夹爪力矩上限 (0-1)</label>
+-            <input id="rightGripForce" type="number" step="0.01" min="0.01" max="1" value="0.12"></div></div>
+-        </div>
+-      </div>
+-
+-      <div class="scroll" style="margin-top:14px">
+-        <table class="table" id="dualPortTable">
+-          <thead><tr><th>串口</th><th>描述</th><th>硬件 ID</th><th>可用性</th><th>分配给</th></tr></thead>
+-          <tbody><tr><td colspan="5" class="muted">点「扫描串口」读取真实设备列表</td></tr></tbody>
+-        </table>
+-      </div>
+-
+-      <div class="btn-row" style="margin-top:14px">
+-        <button class="btn subtle" id="btnScanDualPorts">扫描串口</button>
+-        <button class="btn subtle" id="btnProbeTypes">检测双臂类型</button>
+-        <button class="btn" id="btnSaveDualCfg">保存设备配置</button>
+-        <button class="btn primary" id="btnConnectDual">连接四路串口</button>
+-        <button class="btn subtle" id="btnDisconnectDual">断开</button>
+-      </div>
+-      <hr>
+-      <div class="card-h"><h2 style="font-size:13.5px">分别校准</h2>
+-        <span class="sub">校准文件按各子臂 id 保存，录制时复合配置读取同一份</span></div>
+-      <div class="btn-row">
+-        <button class="btn subtle" data-cal="left:leader">校准左主臂</button>
+-        <button class="btn subtle" data-cal="left:follower">校准左从臂</button>
+-        <button class="btn subtle" data-cal="right:leader">校准右主臂</button>
+-        <button class="btn subtle" data-cal="right:follower">校准右从臂</button>
+-      </div>
+-    </div>
+-
+-    <div class="card">
+-      <div class="card-h"><h2>双臂协作编排</h2><span class="sub" id="planMeta">读取中…</span></div>
+-      <div class="row">
+-        <div class="field"><label>协作模板</label><select id="planTemplate"></select></div>
+-        <div class="field"><label>阶段计时（本地计时，仅提示操作节奏）</label>
+-          <div class="note" id="phaseClock" style="padding:7px 10px">未开始</div></div>
+-        <div class="btn-row">
+-          <button class="btn subtle" type="button" id="btnPhaseTimer">开始计时</button>
+-          <button class="btn primary" type="button" id="btnSavePlan">保存编排</button>
+-        </div>
+-      </div>
+-      <label class="check" style="margin-top:10px"><input type="checkbox" id="applyTask" checked>
+-        保存编排时把任务描述写入采集参数 <code>single_task</code></label>
+-      <div class="scroll" style="margin-top:12px">
+-        <table class="table" id="phaseTable">
+-          <thead><tr><th>阶段</th><th>时长 (s)</th><th>左臂动作</th><th>右臂动作</th><th>同步点</th></tr></thead>
+-          <tbody><tr><td colspan="5" class="muted">读取中…</td></tr></tbody>
+-        </table>
+-      </div>
+-      <div class="note" style="margin-top:12px">
+-        协作模板决定任务描述与阶段节奏，阶段表用于人和遥操作员按节拍配合；
+-        两臂的真实动作由遥操作设备或策略产生，页面不会生成模拟轨迹或伪造采集数据。
+-        保存后会在 <code>outputs/dual_plans/</code> 生成真实的 JSON 计划文件。
+-      </div>
+-    </div>
+-
+-    <div class="card">
+-      <div class="card-h"><h2>同步遥操作与双臂采集</h2>
+-        <span class="sub">lerobot-teleoperate / lerobot-record · 双臂复合配置</span></div>
+-      <div class="btn-row">
+-        <button class="btn primary" id="btnDualTeleop">开始同步遥操作</button>
+-        <button class="btn danger" id="btnDualStop">全局急停</button>
+-      </div>
+-      <form id="dualRecordForm" style="margin-top:14px">
+-        <div class="row">
+-          <div class="field wide"><label>数据集 repo_id</label><input name="repo_id"></div>
+-          <div class="field"><label>剧集数</label><input name="num_episodes" type="number"></div>
+-          <div class="field wide"><label>任务描述 single_task</label><input name="single_task"></div>
+-        </div>
+-        <div class="row" style="margin-top:10px">
+-          <div class="field"><label>单集时长 (s)</label><input name="episode_time_s" type="number"></div>
+-          <div class="field"><label>重置时长 (s)</label><input name="reset_time_s" type="number"></div>
+-          <label class="check"><input type="checkbox" name="auto_home"> 结束回零卸力</label>
+-          <label class="check"><input type="checkbox" name="display_data"> 显示数据</label>
+-          <label class="check"><input type="checkbox" name="resume"> 续录</label>
+-          <label class="check"><input type="checkbox" name="push_to_hub"> 上传 Hub</label>
+-        </div>
+-        <div class="btn-row" style="margin-top:12px">
+-          <button class="btn subtle" type="submit">保存采集参数</button>
+-          <button class="btn primary" type="button" id="btnDualRecord">开始双臂采集</button>
+-          <button class="btn subtle" type="button" id="btnDualKeyRight">→ 下一集</button>
+-          <button class="btn subtle" type="button" id="btnDualKeyLeft">← 重录本集</button>
+-          <button class="btn danger" type="button" id="btnDualKeyEsc">ESC 结束会话</button>
+-        </div>
+-      </form>
+-      <div class="note" style="margin-top:12px">
+-        采集前请确认已开启双臂模式、填好复合类型、完成四路串口连接；
+-        后端会真实打开串口并拒绝未连接的任务，不会静默执行。
+-      </div>
+-    </div>
+-
+-    <div class="grid2">
+-      <div class="card">
+-        <div class="card-h"><h2>双臂训练</h2><span class="sub">lerobot-train · 数据集维度自动适配</span></div>
+-        <form id="dualTrainForm">
+-          <div class="row">
+-            <div class="field wide"><label>数据集</label><select id="dualTrainDs" name="repo_id"></select></div>
+-            <div class="field"><label>策略类型</label><select name="policy_type">
+-              <option value="act">ACT</option><option value="diffusion">Diffusion</option>
+-              <option value="smolvla">SmolVLA</option>
+-            </select></div>
+-          </div>
+-          <div class="row" style="margin-top:10px">
+-            <div class="field"><label>steps</label><input name="steps" type="number"></div>
+-            <div class="field"><label>batch_size（0=默认）</label><input name="batch_size" type="number"></div>
+-            <div class="field"><label>device</label><input name="device"></div>
+-          </div>
+-          <div class="row" style="margin-top:10px">
+-            <div class="field wide"><label>输出目录</label><input name="output_dir"></div>
+-            <div class="field"><label>job_name</label><input name="job_name"></div>
+-          </div>
+-          <div class="btn-row" style="margin-top:12px">
+-            <button class="btn subtle" type="button" id="btnDualFeatures">校验数据集特征</button>
+-            <button class="btn primary" type="button" id="btnDualTrain">开始训练</button>
+-          </div>
+-        </form>
+-        <div class="note" id="dualFeatureBox" style="margin-top:12px">
+-          点「校验数据集特征」读取 <code>meta/info.json</code>，确认 action / state 维度确实是双臂拼接。
+-        </div>
+-      </div>
+-
+-      <div class="card">
+-        <div class="card-h"><h2>双臂评估</h2><span class="sub">lerobot-record + policy.path · 真机跑策略</span></div>
+-        <form id="dualEvalForm">
+-          <div class="field"><label>策略检查点</label><select name="policy_path" id="dualEvalCkpt"></select></div>
+-          <div class="field" style="margin-top:10px"><label>评估数据集 repo_id</label><input name="repo_id"></div>
+-          <div class="field" style="margin-top:10px"><label>任务描述</label><input name="single_task"></div>
+-          <div class="row" style="margin-top:10px">
+-            <div class="field narrow"><label>剧集数</label><input name="num_episodes" type="number"></div>
+-            <div class="field narrow"><label>单集时长 (s)</label><input name="episode_time_s" type="number"></div>
+-            <div class="field narrow"><label>重置时长 (s)</label><input name="reset_time_s" type="number"></div>
+-          </div>
+-          <label class="check" style="margin-top:10px"><input type="checkbox" name="auto_home">
+-            结束回零卸力</label>
+-          <div class="btn-row" style="margin-top:12px">
+-            <button class="btn subtle" type="submit">保存评估参数</button>
+-            <button class="btn primary" type="button" id="btnDualEval">开始评估</button>
+-          </div>
+-        </form>
+-        <div class="note" style="margin-top:12px">
+-          评估会同时驱动左右从臂，请确认工作空间没有人员或障碍物；
+-          检查点来自「模型训练」产出的 pretrained_model。
+-        </div>
+-      </div>
+-    </div>
+-
+-    <div class="card">
+-      <div class="card-h"><h2>命令预览</h2>
+-        <span class="sub">真实展示将要执行的命令；双臂类型或串口缺失时会明确报错</span></div>
+-      <div class="row">
+-        <div class="field"><label>操作</label><select id="previewKind">
+-          <option value="record">双臂采集</option>
+-          <option value="teleoperate">同步遥操作</option>
+-          <option value="eval">双臂评估</option>
+-          <option value="replay">数据集回放</option>
+-          <option value="robot-client">异步推理客户端</option>
+-          <option value="train">训练</option>
+-          <option value="calibrate-left-follower">校准左从臂</option>
+-          <option value="calibrate-left-leader">校准左主臂</option>
+-          <option value="calibrate-right-follower">校准右从臂</option>
+-          <option value="calibrate-right-leader">校准右主臂</option>
+-        </select></div>
+-        <div class="btn-row"><button class="btn subtle" id="btnPreview">生成命令预览</button></div>
+-      </div>
+-      <div class="dual-cmd" id="dualCmdBox" style="margin-top:12px">点「生成命令预览」查看真实命令。</div>
+-    </div>
+-
+-    <div class="card">
+-      <div class="card-h"><h2>执行日志</h2>
+-        <span class="sub"><label class="check"><input type="checkbox" id="logAuto" checked> 自动滚动</label></span></div>
+-      <div class="log" id="logPanel"></div>
+-    </div>
+-  </div>
+-  <script src="/static/js/common.js?v=2026111303"></script>
+-  <script src="/static/js/dual.js?v=133"></script>
+-</body>
+-</html>
++<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=/p/connect"><title>设备连接与校准</title></head><body><a href="/p/connect">前往设备连接与校准</a></body></html>
+--- a/frontend/pages/logs.html
++++ b/frontend/pages/logs.html
+@@ -4,7 +4,7 @@
+   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+   <title>日志与命令 · 机械臂控制台</title>
+   <link rel="icon" type="image/svg+xml" href="/static/img/logo.svg">
+-  <link rel="stylesheet" href="/static/css/style.css?v=2026111303">
++  <link rel="stylesheet" href="/static/css/style.css?v=20261113-functional-final">
+ </head>
+ <body>
+   <div id="shell"></div>
+@@ -37,7 +37,8 @@
+       <div class="chart-wrap"><canvas id="lossChart"></canvas></div>
+     </div>
+   </div>
+-  <script src="/static/js/common.js?v=2026111303"></script>
++  <script src="/static/js/common.js?v=20261113-functional-final"></script>
++  <script src="/static/js/autosave.js?v=20261113-functional-final"></script>
+   <script src="/static/js/logs.js?v=133"></script>
+ </body>
+ </html>
+--- a/frontend/pages/train.html
++++ b/frontend/pages/train.html
+@@ -4,7 +4,7 @@
+   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+   <title>模型训练 · 机械臂控制台</title>
+   <link rel="icon" type="image/svg+xml" href="/static/img/logo.svg">
+-  <link rel="stylesheet" href="/static/css/style.css?v=2026111303">
++  <link rel="stylesheet" href="/static/css/style.css?v=20261113-functional-final">
+ </head>
+ <body>
+   <div id="shell"></div>
+@@ -46,6 +46,7 @@
+         </div>
+         <div class="hint" id="dsDirInfo" style="margin-top:6px">平台录制目录：读取中…</div>
+ 
++        <div class="dataset-features"><div class="section-toolbar"><strong>数据集特征</strong><button class="btn subtle sm" id="btnCheckFeatures" data-app-nofb>重新检查</button></div><p class="hint" id="datasetFeatures" aria-live="polite">选择数据集后自动检查动作、状态和相机特征。</p></div>
+         <div class="row" style="margin-top:12px">
+           <div class="field"><label>batch_size（0 = 默认）</label><input id="l_batch_size" type="number" value="0"></div>
+           <div class="field"><label>device</label><input id="l_device" value="cuda"></div>
+@@ -134,6 +135,7 @@
+       </div>
+     </div>
+ 
++    <details class="card advanced-settings"><summary>已保存配置的训练命令</summary><pre class="command-preview" id="trainCommandPreview">正在生成…</pre></details>
+     <div class="grid2">
+       <div class="card">
+         <div class="card-h"><h2>Loss 曲线</h2><span class="sub" id="lossCount">0 个指标点</span></div>
+@@ -159,7 +161,9 @@
+       <div class="log" id="logPanel"></div>
+     </div>
+   </div>
+-  <script src="/static/js/common.js?v=2026111303"></script>
+-  <script src="/static/js/train.js?v=133"></script>
++  <script src="/static/js/common.js?v=20261113-functional-final"></script>
++  <script src="/static/js/autosave.js?v=20261113-functional-final"></script>
++  <script src="/static/js/train.js?v=20261113-functional-final"></script>
++  <script src="/static/js/dataset-features.js?v=20261113-functional-final"></script>
+ </body>
+ </html>
+--- a/frontend/pages/teleop.html
++++ b/frontend/pages/teleop.html
+@@ -4,7 +4,7 @@
+   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+   <title>遥操作 · 机械臂控制台</title>
+   <link rel="icon" type="image/svg+xml" href="/static/img/logo.svg">
+-  <link rel="stylesheet" href="/static/css/style.css?v=2026111303">
++  <link rel="stylesheet" href="/static/css/style.css?v=20261113-functional-final">
+ </head>
+ <body>
+   <div id="shell"></div>
+@@ -18,9 +18,9 @@
+         <button class="btn danger" id="btnStop">停止并收工（回零卸力）</button>
+         <label class="check"><input type="checkbox" id="displayData" checked> 显示数据</label>
+       </div>
+-      <div class="note" style="margin-top:14px" id="cmdPreview">正在生成命令预览 …</div>
++      <details class="device-parameters"><summary>已保存配置的遥操作命令</summary><pre class="command-preview" id="cmdPreview">正在生成命令预览…</pre></details>
+       <div class="note" style="margin-top:10px">
+-        需先在「串口与校准」页面分别选择串口连接主从臂；未连接时后端会明确拒绝，不会静默执行。
++        需先在「设备连接与校准」页面分别选择串口连接主从臂；未连接时后端会明确拒绝，不会静默执行。
+       </div>
+     </div>
+ 
+@@ -53,7 +53,8 @@
+       <div class="log" id="logPanel"></div>
+     </div>
+   </div>
+-  <script src="/static/js/common.js?v=2026111303"></script>
+-  <script src="/static/js/teleop.js?v=133"></script>
++  <script src="/static/js/common.js?v=20261113-functional-final"></script>
++  <script src="/static/js/autosave.js?v=20261113-functional-final"></script>
++  <script src="/static/js/teleop.js?v=20261113-functional-final2"></script>
+ </body>
+ </html>
+--- a/frontend/pages/dataset.html
++++ b/frontend/pages/dataset.html
+@@ -4,13 +4,19 @@
+   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+   <title>训练数据 · 机械臂控制台</title>
+   <link rel="icon" type="image/svg+xml" href="/static/img/logo.svg">
+-  <link rel="stylesheet" href="/static/css/style.css?v=2026111303">
++  <link rel="stylesheet" href="/static/css/style.css?v=20261113-functional-final">
+ </head>
+ <body>
+   <div id="shell"></div>
+   <div id="page" class="page">
+     <div id="dsAlert" class="alert"></div>
+ 
++    <details class="card advanced-settings" id="collectionPlan" hidden>
++      <summary>双臂采集编排</summary><p class="hint">按阶段提示示教节奏；推拢、翻盒、翻袋请分别采集与训练。</p>
++      <div class="row"><div class="field"><label for="planTemplate">协作模板</label><select id="planTemplate"></select></div><div class="field"><label>阶段计时</label><div class="note" id="phaseClock">未开始</div></div><div class="btn-row"><button class="btn" id="btnPhaseTimer" data-app-nofb>开始计时</button><button class="btn subtle" id="btnExportPlan" data-app-nofb>导出编排</button></div></div>
++      <label class="check"><input type="checkbox" id="applyTask">使用模板任务描述（自动更新采集参数）</label><p class="hint" id="planMeta"></p>
++      <div class="scroll"><table class="table" id="phaseTable"><thead><tr><th>阶段</th><th>时长</th><th>左臂</th><th>右臂</th><th>同步</th></tr></thead><tbody></tbody></table></div>
++    </details>
+     <div class="card">
+       <div class="card-h"><h2>采集数据</h2><span class="sub">lerobot-record · 需先连接主从臂</span></div>
+       <form id="recordForm">
+@@ -90,6 +96,7 @@
+       </form>
+     </div>
+ 
++    <details class="card advanced-settings"><summary>已保存配置的采集命令</summary><pre class="command-preview" id="workflowCommand">正在生成…</pre></details>
+     <div class="card">
+       <div class="card-h"><h2>执行日志</h2>
+         <span class="sub"><label class="check"><input type="checkbox" id="logAuto" checked> 自动滚动</label></span>
+@@ -110,7 +117,9 @@
+     <iframe id="camDockFrame" src="about:blank" title="摄像头画面"></iframe>
+   </div>
+ 
+-  <script src="/static/js/common.js?v=2026111303"></script>
+-  <script src="/static/js/dataset.js?v=133"></script>
++  <script src="/static/js/common.js?v=20261113-functional-final"></script>
++  <script src="/static/js/autosave.js?v=20261113-functional-final"></script>
++  <script src="/static/js/dataset.js?v=20261113-functional-final"></script>
++  <script src="/static/js/collection-plan.js?v=20261113-functional-final"></script>
+ </body>
+ </html>
+--- a/frontend/pages/yolo.html
++++ b/frontend/pages/yolo.html
+@@ -4,7 +4,7 @@
+   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+   <title>视觉数据 · 机械臂控制台</title>
+   <link rel="icon" href="/static/img/logo.svg">
+-  <link rel="stylesheet" href="/static/css/style.css?v=2026111303">
++  <link rel="stylesheet" href="/static/css/style.css?v=20261113-functional-final">
+ </head>
+ <body>
+   <div id="shell"></div>
+@@ -162,7 +162,8 @@
+       <div class="log" id="logPanel"></div>
+     </div>
+   </div>
+-  <script src="/static/js/common.js?v=2026111303"></script>
+-  <script src="/static/js/yolo.js?v=133"></script>
++  <script src="/static/js/common.js?v=20261113-functional-final"></script>
++  <script src="/static/js/autosave.js?v=20261113-functional-final"></script>
++  <script src="/static/js/yolo.js?v=20261113-functional-final"></script>
+ </body>
+ </html>
+--- a/frontend/pages/grasp.html
++++ b/frontend/pages/grasp.html
+@@ -4,7 +4,7 @@
+   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+   <title>视觉抓取 · 机械臂控制台</title>
+   <link rel="icon" href="/static/img/logo.svg">
+-  <link rel="stylesheet" href="/static/css/style.css?v=2026111303">
++  <link rel="stylesheet" href="/static/css/style.css?v=20261113-functional-final">
+ </head>
+ <body>
+   <div id="shell"></div>
+@@ -71,7 +71,8 @@
+       <div class="log" id="logPanel"></div>
+     </div>
+   </div>
+-  <script src="/static/js/common.js?v=2026111303"></script>
++  <script src="/static/js/common.js?v=20261113-functional-final"></script>
++  <script src="/static/js/autosave.js?v=20261113-functional-final"></script>
+   <script src="/static/js/grasp.js?v=133"></script>
+ </body>
+ </html>
+--- a/frontend/pages/home.html
++++ b/frontend/pages/home.html
+@@ -4,7 +4,7 @@
+   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+   <title>总览 · 机械臂控制台</title>
+   <link rel="icon" type="image/svg+xml" href="/static/img/logo.svg">
+-  <link rel="stylesheet" href="/static/css/style.css?v=2026111303">
++  <link rel="stylesheet" href="/static/css/style.css?v=20261113-functional-final">
+ </head>
+ <body>
+   <div id="shell"></div>
+@@ -60,7 +60,8 @@
+       <div class="log" id="logPanel"></div>
+     </div>
+   </div>
+-  <script src="/static/js/common.js?v=2026111303"></script>
+-  <script src="/static/js/home.js?v=2026111303"></script>
++  <script src="/static/js/common.js?v=20261113-functional-final"></script>
++  <script src="/static/js/autosave.js?v=20261113-functional-final"></script>
++  <script src="/static/js/home.js?v=20261113-functional-final"></script>
+ </body>
+ </html>
+--- a/frontend/pages/camera.html
++++ b/frontend/pages/camera.html
+@@ -4,7 +4,7 @@
+   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+   <title>摄像头 · reBot 控制台</title>
+   <link rel="icon" type="image/svg+xml" href="/static/img/logo.svg">
+-  <link rel="stylesheet" href="/static/css/style.css?v=2026111303">
++  <link rel="stylesheet" href="/static/css/style.css?v=20261113-functional-final">
+ </head>
+ <body>
+   <div id="shell"></div>
+@@ -14,12 +14,12 @@
+       <div><h2>相机设备</h2><p>连接、预览和配置每一路相机</p></div>
+       <div class="btn-row">
+         <button class="btn subtle" id="btnDiscover" data-app-nofb>扫描设备</button>
+-        <button class="btn" id="btnAddCam" data-app-nofb>添加相机</button>
+-        <button class="btn primary" id="btnSaveCam" data-app-nofb disabled>保存配置</button>
++        <button class="btn primary" id="btnAddCam" data-app-nofb>添加相机</button>
++        <button class="btn primary" id="btnSaveCam" data-app-nofb hidden disabled>重试保存</button>
+       </div>
+     </div>
+     <div class="section-toolbar">
+-      <div class="camera-summary"><span class="badge" id="camState">正在读取…</span><span class="save-state" id="saveState">配置已保存</span></div>
++      <div class="camera-summary"><span class="badge" id="camState">正在读取…</span><span class="save-state" id="saveState">配置自动保存</span></div>
+       <div class="btn-row"><button class="btn subtle sm" id="btnPreviewAll" data-app-nofb>全部预览</button><button class="btn subtle sm" id="btnPauseAll" data-app-nofb>暂停全部</button></div>
+     </div>
+     <div class="camera-workspace" id="camGrid" aria-label="相机预览"></div>
+@@ -45,11 +45,12 @@
+         <div class="row"><div class="field"><label for="camWidth">宽度</label><input id="camWidth" type="number" min="16" max="7680" required value="640"></div><div class="field"><label for="camHeight">高度</label><input id="camHeight" type="number" min="16" max="4320" required value="480"></div><div class="field"><label for="camFps">采集 FPS</label><input id="camFps" type="number" min="1" max="120" required value="30"></div></div>
+         <div class="row"><div class="field"><label for="camType">后端</label><select id="camType"><option value="opencv">OpenCV · USB 彩色</option><option value="realsense">RealSense SDK</option><option value="orbbec">Orbbec SDK</option></select></div><div class="field"><label for="camFourcc">传输格式</label><input id="camFourcc" maxlength="4" minlength="4" required value="MJPG"></div></div>
+         <label class="check"><input id="camPreview" type="checkbox" checked>打开本页时自动预览</label>
+-        <div class="btn-row dialog-actions"><button type="button" class="btn subtle" id="btnCancelCamera" data-app-nofb>取消</button><button type="submit" class="btn primary" data-app-nofb>应用到列表</button></div>
++        <div class="btn-row dialog-actions"><button type="button" class="btn subtle" id="btnCancelCamera" data-app-nofb>关闭</button><button type="submit" class="btn primary" data-app-nofb>完成</button></div>
+       </form>
+     </dialog>
+   </main>
+-  <script src="/static/js/common.js?v=2026111303"></script>
+-  <script src="/static/js/camera.js?v=2026111303"></script>
++  <script src="/static/js/common.js?v=20261113-functional-final"></script>
++  <script src="/static/js/autosave.js?v=20261113-functional-final"></script>
++  <script src="/static/js/camera.js?v=20261113-functional-final"></script>
+ </body>
+ </html>
+--- a/frontend/pages/setup.html
++++ b/frontend/pages/setup.html
+@@ -4,7 +4,7 @@
+   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+   <title>环境安装 · 机械臂控制台</title>
+   <link rel="icon" type="image/svg+xml" href="/static/img/logo.svg">
+-  <link rel="stylesheet" href="/static/css/style.css?v=2026111303">
++  <link rel="stylesheet" href="/static/css/style.css?v=20261113-functional-final">
+ </head>
+ <body>
+   <div id="shell"></div>
+@@ -72,7 +72,8 @@
+       <div class="log" id="logPanel"></div>
+     </div>
+   </div>
+-  <script src="/static/js/common.js?v=2026111303"></script>
+-  <script src="/static/js/setup.js?v=133"></script>
++  <script src="/static/js/common.js?v=20261113-functional-final"></script>
++  <script src="/static/js/autosave.js?v=20261113-functional-final"></script>
++  <script src="/static/js/setup.js?v=20261113-functional-final"></script>
+ </body>
+ </html>
+--- a/frontend/pages/connect.html
++++ b/frontend/pages/connect.html
+@@ -1,18 +1,42 @@
+ <!DOCTYPE html>
+-<html lang="zh-CN" data-theme="light">
+-<head>
+-  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+-  <title>串口与校准 · 机械臂控制台</title>
+-  <link rel="icon" type="image/svg+xml" href="/static/img/logo.svg">
+-  <link rel="stylesheet" href="/static/css/style.css?v=2026111303">
+-</head>
+-<body>
+-  <div id="shell"></div>
+-  <div id="page" class="page">
+-    <div id="connAlert" class="alert"></div>
+-
+-    <div class="card">
+-      <div class="card-h"><h2 id="permTitle">串口授权</h2><span class="sub" id="permSub">启动时已提示输入 sudo 密码执行 chmod 666</span></div>
++<html lang="zh-CN" data-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
++<title>设备连接与校准 · reBot 控制台</title><link rel="icon" href="/static/img/logo.svg"><link rel="stylesheet" href="/static/css/style.css?v=20261113-functional-final"></head>
++<body><div id="shell"></div><main id="page" class="page">
++ <div id="connAlert" class="alert"></div>
++ <section class="card"><div class="card-h"><h2>机器人配置</h2><span class="badge" id="currentMode">读取中…</span></div>
++ <div class="mode-settings"><div class="field"><label for="robotMode">控制对象</label><select id="robotMode" disabled><option value="single">单臂 · 一主一从</option><option value="dual">双臂 · 左右各一主一从</option></select></div>
++ <span class="hint">选择后自动保存并应用</span></div>
++ <p class="hint" id="modeHint">正在读取当前配置</p></section>
++ <section class="card" id="deviceSettings"><div class="card-h"><h2 id="connectionTitle">机械臂连接</h2><span class="badge" id="connState">读取中…</span></div>
++ <div data-mode="single" hidden><div class="row"><div class="field"><label for="leaderPort">主臂串口</label><select id="leaderPort" class="port-selector"></select></div><div class="field"><label for="followerPort">从臂串口</label><select id="followerPort" class="port-selector"></select></div></div>
++ <details class="device-parameters"><summary>设备参数与夹持力矩</summary><div class="row">
++ <div class="field"><label for="followerId">从臂 ID</label><input id="followerId"></div><div class="field"><label for="leaderId">主臂 ID</label><input id="leaderId"></div><div class="field"><label for="singleCan">CAN 适配器</label><input id="singleCan"></div><div class="field"><label for="singleGripForce">夹爪力矩上限 (0–1)</label><input id="singleGripForce" type="number" min="0.01" max="1" step="0.01"></div></div></details></div>
++ <div data-mode="dual" hidden><div class="dual-arm-grid"><section class="dual-arm-box" aria-label="左臂设备配置"><h3>左臂</h3>
++ <div class="row"><div class="field"><label for="left_follower">从臂串口 · B601-DM</label><select id="left_follower" class="port-selector"></select></div><div class="field"><label for="left_leader">主臂串口 · Leader</label><select id="left_leader" class="port-selector"></select></div></div>
++ <details class="device-parameters"><summary>设备参数与夹持力矩</summary>
++ <div class="row"><div class="field"><label for="leftFollowerId">从臂 ID</label><input id="leftFollowerId"></div><div class="field"><label for="leftLeaderId">主臂 ID</label><input id="leftLeaderId"></div></div>
++ <div class="row"><div class="field"><label for="leftCan">CAN 适配器</label><input id="leftCan"></div><div class="field"><label for="leftGripForce">夹爪力矩上限 (0–1)</label><input id="leftGripForce" type="number" step="0.01" min="0.01" max="1"></div></div>
++ <div class="row"><div class="field"><label for="leftFollowerType">从臂类型</label><input id="leftFollowerType"></div><div class="field"><label for="leftLeaderType">主臂类型</label><input id="leftLeaderType"></div></div>
++ </details></section><section class="dual-arm-box" aria-label="右臂设备配置"><h3>右臂</h3>
++ <div class="row"><div class="field"><label for="right_follower">从臂串口 · B601-DM</label><select id="right_follower" class="port-selector"></select></div><div class="field"><label for="right_leader">主臂串口 · Leader</label><select id="right_leader" class="port-selector"></select></div></div>
++ <details class="device-parameters"><summary>设备参数与夹持力矩</summary>
++ <div class="row"><div class="field"><label for="rightFollowerId">从臂 ID</label><input id="rightFollowerId"></div><div class="field"><label for="rightLeaderId">主臂 ID</label><input id="rightLeaderId"></div></div>
++ <div class="row"><div class="field"><label for="rightCan">CAN 适配器</label><input id="rightCan"></div><div class="field"><label for="rightGripForce">夹爪力矩上限 (0–1)</label><input id="rightGripForce" type="number" step="0.01" min="0.01" max="1"></div></div>
++ <div class="row"><div class="field"><label for="rightFollowerType">从臂类型</label><input id="rightFollowerType"></div><div class="field"><label for="rightLeaderType">主臂类型</label><input id="rightLeaderType"></div></div>
++ </details></section></div>
++ <details class="device-parameters"><summary>双臂插件配置</summary><div class="row"><div class="field"><label for="dualRobotType">复合机器人类型</label><input id="dualRobotType" list="robotTypeList"><datalist id="robotTypeList"></datalist></div><div class="field"><label for="dualTeleopType">复合主臂类型</label><input id="dualTeleopType" list="teleopTypeList"><datalist id="teleopTypeList"></datalist></div></div>
++ <div class="row"><div class="field"><label for="leftPrefix">左子臂字段名</label><input id="leftPrefix"></div><div class="field"><label for="rightPrefix">右子臂字段名</label><input id="rightPrefix"></div></div>
++ <div class="btn-row"><button class="btn subtle" id="btnProbeTypes" data-app-nofb>检测双臂类型</button><span class="hint" id="typeProbeHint">从所选环境读取已注册的设备插件</span></div></details></div>
++ <div class="device-actions"><span class="save-state">设备参数自动保存</span><div class="btn-row"><button class="btn subtle" id="btnScanPorts" data-app-nofb>扫描串口</button><button class="btn primary" id="btnConnect" data-app-nofb disabled>连接</button><button class="btn subtle" id="btnDisconnect" data-app-nofb disabled>断开</button></div></div>
++ <details class="device-parameters"><summary>已发现的串口设备 <span id="portCount"></span></summary><div class="scroll"><table class="table" id="portTable"><thead><tr><th>串口</th><th>设备</th><th>权限</th><th>分配给</th></tr></thead><tbody></tbody></table></div></details>
++ </section>
++ <section class="card" id="calibration"><div class="card-h"><h2>机械臂校准</h2><span class="sub">按设备分别校准</span></div>
++ <div class="btn-row" data-mode="single" hidden><button class="btn" data-calibrate="leader" disabled>校准主臂</button><button class="btn" data-calibrate="follower" disabled>校准从臂</button></div>
++ <div class="calibration-grid" data-mode="dual" hidden><div><h3>左臂</h3><div class="btn-row"><button class="btn" data-calibrate="left:leader" disabled>校准左主臂</button><button class="btn" data-calibrate="left:follower" disabled>校准左从臂</button></div></div><div><h3>右臂</h3><div class="btn-row"><button class="btn" data-calibrate="right:leader" disabled>校准右主臂</button><button class="btn" data-calibrate="right:follower" disabled>校准右从臂</button></div></div></div>
++ <p class="hint">校准前先完成设备连接，执行进度与回车确认在顶部“任务日志”中查看。</p>
++ <details class="device-parameters"><summary>校准缓存与环境诊断</summary><div class="btn-row"><button class="btn subtle" id="btnClearRobots">清理从臂校准缓存</button><button class="btn subtle" id="btnClearTeleop">清理主臂校准缓存</button><button class="btn subtle" id="btnCheckEnv">环境检查</button></div></details></section>
++     <details class="card advanced-settings" id="permissionsSection">
++      <summary id="permTitle">权限与 USB 设备授权</summary><p class="hint" id="permSub">设备无法读写时在此授权</p>
+       <div class="note" id="permNote">
+         <code>sudo chmod 666 /dev/ttyUSB*</code>（幻尔主臂） ·
+         <code>sudo chmod 666 /dev/ttyACM*</code>（B601-DM 串口桥）
+@@ -32,71 +56,7 @@
+           <tbody><tr><td colspan="3" class="muted">正在检测 …</td></tr></tbody>
+         </table>
+       </div>
+-    </div>
+-
+-    <div class="card">
+-      <div class="card-h"><h2>选择串口连接主从臂</h2><span class="sub" id="connState">未连接</span></div>
+-      <div class="row">
+-        <div class="field"><label>主臂 · 幻尔 Star Arm 102-LD</label><select id="leaderPort"></select></div>
+-        <div class="field"><label>从臂 · Seeed B601-DM（串口桥）</label><select id="followerPort"></select></div>
+-        <div class="btn-row">
+-          <button class="btn subtle" id="btnScanPorts">扫描串口</button>
+-          <button class="btn primary" id="btnConnect">连接</button>
+-          <button class="btn subtle" id="btnDisconnect">断开</button>
+-        </div>
+-      </div>
+-      <div class="scroll" style="margin-top:14px">
+-        <table class="table" id="portTable">
+-          <thead><tr><th>设备</th><th>描述</th><th>硬件 ID</th><th id="portPermTh">权限</th></tr></thead>
+-          <tbody><tr><td colspan="4" class="muted">点击「扫描串口」获取真实设备列表</td></tr></tbody>
+-        </table>
+-      </div>
+-    </div>
+-
+-    <div class="grid2">
+-      <div class="card">
+-        <div class="card-h"><h2>校准</h2><span class="sub">需先连接串口</span></div>
+-        <div class="btn-row">
+-          <button class="btn primary" id="btnCalLeader">校准主臂（幻尔）</button>
+-          <button class="btn primary" id="btnCalFollower">校准从臂（B601-DM）</button>
+-        </div>
+-        <hr>
+-        <div class="btn-row">
+-          <button class="btn subtle" id="btnClearRobots">清理从臂校准缓存</button>
+-          <button class="btn subtle" id="btnClearTeleop">清理主臂校准缓存</button>
+-        </div>
+-        <div class="note" style="margin-top:14px">校准会真实执行 <code>lerobot-calibrate</code>。把机械臂摆到零位，
+-          <strong>用手把夹爪完全捏到底并保持住</strong>，再点页面下方进度条里的「回车确认」（夹爪张开约 8° 会导致夹爪零点校验失败）。
+-          若终端询问是否使用已有校准文件，留空点「发送」表示沿用，输入 <code>c</code> 再发送表示强制重新校准。</div>
+-      </div>
+-      <div class="card">
+-        <div class="card-h"><h2>设备参数</h2><span class="sub">保存到 config.json</span></div>
+-        <form id="armForm">
+-          <div class="row">
+-            <div class="field"><label>从臂 ID</label><input name="follower_id" value="follower1"></div>
+-            <div class="field"><label>CAN 适配器</label><input name="can_adapter" value="damiao"></div>
+-            <div class="field"><label>夹爪力矩上限 (0-1)</label>
+-              <input name="gripper_torque_ratio" type="number" step="0.01" min="0.01" max="1" value="0.12"></div>
+-          </div>
+-          <div class="row" style="margin-top:12px">
+-            <div class="field"><label>主臂 ID</label><input name="leader_id"></div>
+-          </div>
+-          <div class="btn-row" style="margin-top:14px">
+-            <button class="btn subtle" type="submit">保存参数</button>
+-            <button class="btn subtle" type="button" id="btnCheckEnv">环境检查</button>
+-          </div>
+-        </form>
+-      </div>
+-    </div>
+-
+-    <div class="card">
+-      <div class="card-h"><h2>执行日志</h2>
+-        <span class="sub"><label class="check"><input type="checkbox" id="logAuto" checked> 自动滚动</label></span>
+-      </div>
+-      <div class="log" id="logPanel"></div>
+-    </div>
+-  </div>
+-  <script src="/static/js/common.js?v=2026111303"></script>
+-  <script src="/static/js/connect.js?v=133"></script>
+-</body>
+-</html>
++    </details>
++ <section class="card"><div class="card-h"><h2>接下来</h2><span class="sub">单臂与双臂使用同一套功能入口</span></div><div class="btn-row"><a class="btn" href="/p/teleop">遥操作</a><a class="btn" href="/p/dataset">采集数据</a><a class="btn" href="/p/train">模型训练</a><a class="btn" href="/p/eval">策略评估</a></div></section>
++ </main><script src="/static/js/common.js?v=20261113-functional-final"></script><script src="/static/js/connect.js?v=20261113-functional-final"></script>
++  <script src="/static/js/autosave.js?v=20261113-functional-final"></script></body></html>
+--- a/frontend/pages/eval.html
++++ b/frontend/pages/eval.html
+@@ -4,7 +4,7 @@
+   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+   <title>策略评估 · 机械臂控制台</title>
+   <link rel="icon" href="/static/img/logo.svg">
+-  <link rel="stylesheet" href="/static/css/style.css?v=2026111303">
++  <link rel="stylesheet" href="/static/css/style.css?v=20261113-functional-final">
+ </head>
+ <body>
+   <div id="shell"></div>
+@@ -38,12 +38,14 @@
+       </form>
+     </div>
+ 
++    <details class="card advanced-settings"><summary>已保存配置的评估命令</summary><pre class="command-preview" id="workflowCommand">正在生成…</pre></details>
+     <div class="card">
+       <div class="card-h"><h2>执行日志</h2><span class="sub"><label class="check"><input type="checkbox" id="logAuto" checked> 自动滚动</label></span></div>
+       <div class="log" id="logPanel"></div>
+     </div>
+   </div>
+-  <script src="/static/js/common.js?v=2026111303"></script>
+-  <script src="/static/js/eval.js?v=133"></script>
++  <script src="/static/js/common.js?v=20261113-functional-final"></script>
++  <script src="/static/js/autosave.js?v=20261113-functional-final"></script>
++  <script src="/static/js/eval.js?v=20261113-functional-final"></script>
+ </body>
+ </html>
+--- a/frontend/pages/arm.html
++++ b/frontend/pages/arm.html
+@@ -4,7 +4,7 @@
+   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+   <title>从臂控制 · 机械臂控制台</title>
+   <link rel="icon" href="/static/img/logo.svg">
+-  <link rel="stylesheet" href="/static/css/style.css?v=2026111303">
++  <link rel="stylesheet" href="/static/css/style.css?v=20261113-functional-final">
+ </head>
+ <body>
+   <div id="shell"></div>
+@@ -76,7 +76,8 @@
+   <script src="/static/js/three.min.js"></script>
+   <script src="/static/js/STLLoader.js"></script>
+   <script src="/static/js/URDFLoader.js"></script>
+-  <script src="/static/js/common.js?v=2026111303"></script>
++  <script src="/static/js/common.js?v=20261113-functional-final"></script>
++  <script src="/static/js/autosave.js?v=20261113-functional-final"></script>
+   <script src="/static/js/arm3d.js?v=133"></script>
+   <script src="/static/js/arm.js?v=2026111303"></script>
+ </body>
+--- a/frontend/static/css/style.css
++++ b/frontend/static/css/style.css
+@@ -941,3 +941,40 @@
+ @media (max-width: 560px) { .workflow-links { gap: 12px; } .workflow-link { padding: 16px; } }
+ 
+ .workflow-link[aria-disabled="true"] { pointer-events: none; opacity: .6; }
++
++/* Function-oriented device workflows and observable autosave. */
++.mode-settings { display:flex;align-items:flex-end;gap:18px;flex-wrap:wrap; }
++.mode-settings .field { flex:0 1 360px; }
++.mode-settings .hint { padding-bottom:8px; }
++.device-parameters { border-top:1px solid var(--border);margin-top:20px;padding-top:16px; }
++.device-parameters > summary { cursor:pointer;color:var(--text-2);font-size:13px; }
++.device-parameters[open] > summary { margin-bottom:16px; }
++.device-parameters .row + .row { margin-top:12px; }
++.device-parameters .btn-row { margin-top:16px; }
++.device-actions { display:flex;justify-content:space-between;align-items:center;gap:16px;margin-top:24px;flex-wrap:wrap; }
++.calibration-grid { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px; }
++.calibration-grid h3 { font-size:13px;color:var(--text-2);margin-bottom:12px; }
++.robot-context { display:flex;align-items:center;gap:12px;margin-bottom:24px;padding:14px 18px;border:1px solid var(--border);border-radius:12px;background:var(--surface);font-size:13px;color:var(--text-2);flex-wrap:wrap; }
++.robot-context > .btn { margin-left:auto; }
++.dataset-features { margin:18px 0;padding:16px;background:var(--surface-2);border:1px solid var(--border);border-radius:10px; }
++.dataset-features strong { font-size:13px; }
++.command-preview { white-space:pre-wrap;overflow-wrap:anywhere;color:var(--text-2);font:12px/1.8 var(--mono);margin:16px 0 0; }
++.autosave-status { background:transparent;border:0;padding:4px 6px;font-size:12px;color:var(--text-2);min-height:32px;gap:7px; }
++.autosave-status.ok { color:var(--ok); }
++.autosave-status.err { color:var(--err); }
++.autosave-status.saving,.autosave-status.pending { color:var(--warn); }
++.save-indicator { display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor;flex:none; }
++.autosave-status.saving .save-indicator { width:12px;height:12px;background:transparent;border:2px solid currentColor;border-right-color:transparent;animation:save-spin 1s linear infinite; }
++.autosave-error { margin-bottom:18px; }
++.action-pending { pointer-events:none;opacity:.8; }
++.action-pending::after { content:attr(data-waiting);font-size:11px; }
++.action-pending::before { content:'';width:13px;height:13px;flex:none;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:save-spin .8s linear infinite; }
++.action-pending .ico { display:none; }
++@keyframes save-spin { to { transform:rotate(360deg); } }
++@media (prefers-reduced-motion:reduce) { .action-pending::before,.autosave-status.saving .save-indicator { animation:none; } }
++@media (max-width:1450px) { .top-right #chipEnv { display:none; } }
++@media (max-width:900px) { .robot-context > [data-context-detail] { flex:1 1 65%; } .calibration-grid { grid-template-columns:minmax(0,1fr); } }
++@media (max-width:560px) { .autosave-status { margin-right:auto;max-width:145px;font-size:11px; } .device-actions .btn-row { width:100%; } .device-actions .btn { flex:1; } .mode-settings .field { flex:1 1 100%; } .robot-context { padding:12px;gap:10px; } }
++.card-h > .sub, #cmdPreview, #dsDirInfo, #datasetFeatures, .robot-context > [data-context-detail] { min-width:0;max-width:100%;overflow-wrap:anywhere; }
++.chart-wrap { min-width:0;max-width:100%; }
++.chart-wrap canvas { max-width:100%; }
+--- /dev/null
++++ b/frontend/static/js/collection-plan.js
+@@ -0,0 +1,98 @@
++/* Collection-specific cooperation planning. */
++(async function(){
++ 'use strict';var A=window.APP, plan=null,timer=null,phaseIdx=0,phaseLeft=0,alertSel='#dsAlert';
++ var esc=A.esc, planRequest=0;
++ function val(id){var n=A.el(id);return n?n.value:'';}
++ function setv(id,v){var n=A.el(id);if(n)n.value=v;}
++  async function loadPlan(key, quiet) {
++    var requestId=++planRequest;
++    try {
++      var r = await A.api.get("/api/collection/plan?coordination=" + encodeURIComponent(key || "sync"));
++      if(requestId!==planRequest)return;
++      plan = r;
++      var tpl = A.el("planTemplate");
++      if (!tpl.options.length) {
++        tpl.innerHTML = (r.templates || []).map(function (t) {
++          return '<option value="' + esc(t.key) + '">' + esc(t.label) + "（" +
++            esc(t.total_seconds) + "s）</option>";
++        }).join("");
++      }
++      tpl.value = r.coordination;
++      setv("coordination", r.coordination);
++      A.el("planMeta").textContent = r.label + " · " + r.total_seconds + "s · " +
++        r.phases.length + " 阶段 · " + r.desc;
++      A.q("#phaseTable tbody").innerHTML = (r.phases || []).map(function (p, i) {
++        return "<tr data-phase=\"" + i + "\"><td>" + esc(p.name) + "</td><td>" +
++          esc(p.seconds) + "</td><td>" + esc(p.left) + "</td><td>" + esc(p.right) +
++          "</td><td>" + (p.sync ? '<span class="phase-sync">两臂同步到位</span>'
++            : '<span class="muted">各自动作</span>') + "</td></tr>";
++      }).join("");
++      stopTimer(); renderClock("未开始", -1); A.el("btnPhaseTimer").textContent="开始计时";
++      if (!quiet) A.ok("已载入协作模板：" + r.label, alertSel);
++    } catch (e) {
++      A.toast(e.message, "err");
++      A.setAlert(alertSel, e.message, "err");
++    }
++  }
++
++  function stopTimer() {
++    if (timer) { clearInterval(timer); timer = null; }
++    phaseIdx = 0; phaseLeft = 0;
++  }
++
++  function renderClock(text, activeIdx) {
++    A.el("phaseClock").textContent = text;
++    A.qa("#phaseTable tbody tr").forEach(function (tr) {
++      tr.style.opacity = (activeIdx >= 0 && Number(tr.dataset.phase) === activeIdx) ? "1" : ".62";
++      tr.style.background = (activeIdx >= 0 && Number(tr.dataset.phase) === activeIdx) ?
++        "var(--accent-soft)" : "";
++    });
++  }
++
++  function toggleTimer() {
++    if (timer) {
++      stopTimer(); renderClock("未开始", -1); A.el("btnPhaseTimer").textContent="开始计时";
++      renderClock("计时已停止", -1);
++      A.el("btnPhaseTimer").textContent = "开始计时";
++      return;
++    }
++    if (!plan || !plan.phases || !plan.phases.length) { A.toast("请先载入协作模板", "warn"); return; }
++    phaseIdx = 0;
++    phaseLeft = Number(plan.phases[0].seconds) || 0;
++    A.el("btnPhaseTimer").textContent = "停止计时";
++    renderClock("第 1 阶段 · " + plan.phases[0].name + " · 剩余 " + phaseLeft + "s", 0);
++    timer = setInterval(function () {
++      if (!plan || !plan.phases.length) { stopTimer(); return; }
++      phaseLeft -= 1;
++      if (phaseLeft <= 0) {
++        phaseIdx += 1;
++        if (phaseIdx >= plan.phases.length) {
++          stopTimer(); renderClock("未开始", -1); A.el("btnPhaseTimer").textContent="开始计时";
++          renderClock("编排计时完成（共 " + plan.total_seconds + "s）", -1);
++          A.el("btnPhaseTimer").textContent = "开始计时";
++          A.toast("协作编排计时结束", "ok");
++          return;
++        }
++        phaseLeft = Number(plan.phases[phaseIdx].seconds) || 0;
++      }
++      renderClock("第 " + (phaseIdx + 1) + " 阶段 · " + plan.phases[phaseIdx].name +
++        " · 剩余 " + phaseLeft + "s", phaseIdx);
++    }, 1000);
++  }
++
++
++ A.onStatus(function(s){A.el('collectionPlan').hidden=!(s&&s.dual_arm&&s.dual_arm.enabled);});
++ try {
++  var cfg=await A.api.get('/api/config');await loadPlan((cfg.dual_arm||{}).coordination||'sync',true);
++  A.el('applyTask').checked=!!(cfg.dataset||{}).plan_apply_task;
++  var binding=A.autosave.bind({id:'collection-plan',root:'#collectionPlan',
++   read:function(){return {dual_arm:{coordination:val('planTemplate')},dataset:{plan_apply_task:A.el('applyTask').checked}};},
++   apply:function(c){var key=(c.dual_arm||{}).coordination||'sync';if(val('planTemplate')!==key)loadPlan(key,true);A.el('applyTask').checked=!!(c.dataset||{}).plan_apply_task;},
++   write:async function(delta,full){if(full.dataset.plan_apply_task){var template=await A.api.get('/api/collection/plan?coordination='+encodeURIComponent(full.dual_arm.coordination));delta=A.autosave.merge(delta,{dataset:{single_task:template.task}});}await A.saveConfig(delta);}
++  });
++  A.change('planTemplate',function(){loadPlan(val('planTemplate'),true);});
++  A.click('btnPhaseTimer',toggleTimer);
++  A.click('btnExportPlan',function(){A.action(async function(){await binding.flush();var r=await A.api.post('/api/collection/plan',{coordination:val('planTemplate'),apply_task:A.el('applyTask').checked});A.ok('编排已导出：'+r.path,alertSel);},alertSel);});
++ }catch(e){A.setAlert(alertSel,e.message,'err');}
++ window.addEventListener('pagehide',stopTimer);
++})();
+--- /dev/null
++++ b/frontend/static/js/autosave.js
+@@ -0,0 +1,189 @@
++/* Serialized, observable autosave. Remote updates merge around local edits. */
++(function () {
++  'use strict';
++  var A = window.APP, external = new Map(), bindings = [], writeQueue = Promise.resolve(), listeners = [];
++  var revision = 0, pullTimer, pulling = false, pullAgain = false, retryTimer, directWrites=0, writeError='';
++  var draftKey = 'rebot.autosave.' + location.origin + location.pathname;
++  var latestConfig = null;
++  function copy(v) { return v === undefined ? undefined : JSON.parse(JSON.stringify(v)); }
++  function same(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
++  function diff(base, value) {
++    if (same(base, value)) return undefined;
++    if (value && typeof value === 'object' && !Array.isArray(value)) {
++      var out = {};
++      Object.keys(value).forEach(function (key) {
++        var delta = diff((base || {})[key], value[key]);
++        if (delta !== undefined) out[key] = delta;
++      });
++      return Object.keys(out).length ? out : undefined;
++    }
++    return copy(value);
++  }
++  function merge(base, patch) {
++    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return copy(patch);
++    var out = Object.assign({}, base || {});
++    Object.keys(patch).forEach(function (k) { out[k] = merge(out[k], patch[k]); });
++    return out;
++  }
++  function drafts() {
++    try { return JSON.parse(sessionStorage.getItem(draftKey) || '{}'); } catch (e) { return {}; }
++  }
++  function remember(binding) {
++    try {
++      var data = drafts(), delta = diff(binding.baseline, binding.read());
++      if (delta !== undefined) data[binding.id] = delta; else delete data[binding.id];
++      sessionStorage.setItem(draftKey, JSON.stringify(data));
++    } catch (e) { /* Quota failures do not replace the visible server error. */ }
++  }
++  function status() {
++    var node = A.el('autosaveState'); if (!node) return;
++    var states=bindings.concat(Array.from(external.values()));
++    var error = states.find(function (b) { return b.error; }) || (writeError?{error:writeError}:null);
++    var saving = directWrites>0 || states.some(function (b) { return b.saving; });
++    var pending = states.some(function (b) { return b.dirty; });
++    node.className = 'autosave-status ' + (error ? 'err' : saving ? 'saving' : pending ? 'pending' : 'ok');
++    node.querySelector('[data-save-label]').textContent = error ? '保存失败 · 点击重试' : saving ? '正在保存…' : pending ? '等待自动保存…' : '所有更改已保存';
++    node.title = error ? error.error : '配置自动保存，任务仍由操作按钮启动';
++    node.setAttribute('aria-busy', String(saving));
++    var detail=A.el('autosaveError');if(detail){detail.hidden=!error;detail.textContent=error?('自动保存未完成：'+error.error+'。内容已保留，点击顶部保存状态可重试。'):'';}
++  }
++  function mount() {
++    if (A.el('autosaveState')) return;
++    var node = document.createElement('button');
++    node.id = 'autosaveState'; node.type = 'button'; node.className = 'autosave-status ok';
++    node.setAttribute('data-app-nofb', ''); node.setAttribute('aria-live', 'polite');
++    node.innerHTML = '<span class="save-indicator" aria-hidden="true"></span><span data-save-label>所有更改已保存</span>';
++    node.onclick = function () { flushAll().catch(function () {}); };
++    var header = A.q('.top-right'); if (header) header.prepend(node);
++    var detail=document.createElement('div');detail.id='autosaveError';detail.className='alert err autosave-error';detail.hidden=true;detail.setAttribute('role','alert');
++    var content=A.q('.content');if(content)content.prepend(detail);
++  }
++  function enqueue(fn) {
++    var result = writeQueue.catch(function () {}).then(fn);
++    writeQueue = result.catch(function () {}); return result;
++  }
++  function write(patch) {
++    directWrites++;writeError='';mount();status();
++    return enqueue(async function () {
++      var result = await A.api.post('/api/config', patch);
++      latestConfig = result.config || merge(latestConfig, patch);
++      schedulePull(); return result;
++    }).catch(function(e){writeError=e.message;throw e;}).finally(function(){directWrites--;status();});
++  }
++  async function flush(binding) {
++    clearTimeout(binding.timer);
++    if (binding.saving) { await binding.saving; if (binding.dirty) return flush(binding); return; }
++    var value = copy(binding.read()), delta = diff(binding.baseline, value);
++    if (delta === undefined) { binding.dirty = false; binding.error = ''; remember(binding); status(); return; }
++    binding.dirty = true;
++    try { if (binding.validate) binding.validate(value); }
++    catch (e) { binding.error = e.message; status(); throw e; }
++    binding.error = '';
++    binding.saving = (async function () {
++      await (binding.write || write)(delta, value);
++      binding.baseline = value;
++      binding.dirty = diff(binding.baseline, binding.read()) !== undefined;
++      binding.error = '';writeError=''; remember(binding);
++    })();
++    status();
++    try { await binding.saving; }
++    catch (e) { binding.error = e.message; binding.dirty = true; remember(binding); throw e; }
++    finally { binding.saving = null; status(); }
++    if (binding.dirty) return flush(binding);
++  }
++  function schedule(binding) {
++    binding.dirty = diff(binding.baseline, binding.read()) !== undefined;
++    binding.error = ''; remember(binding); status(); clearTimeout(binding.timer);
++    if (binding.dirty) binding.timer = setTimeout(function () { flush(binding).catch(function () {}); }, binding.delay || 600);
++  }
++  function bind(options) {
++    var old = bindings.find(function (b) { return b.id === options.id; }); if (old) return old;
++    var b = Object.assign({dirty: false, error: '', saving: null}, options);
++    b.baseline = copy(b.read());
++    b.changed = function () { schedule(b); };
++    b.flush = function () { return flush(b); };
++    b.accept = function () { b.baseline = copy(b.read()); b.dirty = false; b.error = ''; remember(b); status(); };
++    bindings.push(b);
++    var root = typeof b.root === 'string' ? A.q(b.root) : b.root;
++    if (root) ['input','change'].forEach(function (event) {
++      root.addEventListener(event, function (e) {
++        if (!e.target.matches('input,select,textarea') || e.target.type === 'password' || e.target.type === 'file') return;
++        schedule(b);
++      });
++    });
++    var draft = drafts()[b.id];
++    if (draft && b.apply) { b.apply(merge(b.read(), draft)); schedule(b); }
++    mount(); status(); return b;
++  }
++  function form(formId, section, options) {
++    var element = A.el(formId); if (!element) return;
++    var opts = options || {};
++    var b = bind(Object.assign({id: section + ':' + formId, root: element, section: section,
++      read: function () { var p = {}; p[section] = A.formData(element); return p; },
++      apply: function (cfg) { A.fillForm(element, cfg[section] || {}); },
++      validate: function () { if (!element.checkValidity()) throw new Error('请检查表单中的必填项和数值范围'); }
++    }, opts));
++    var submit = element.querySelector('button[type="submit"]');
++    if (submit) { submit.textContent = '立即保存'; submit.classList.remove('primary'); submit.classList.add('subtle'); }
++    return b;
++  }
++  async function flushAll() {
++    writeError='';
++    for (var i = 0; i < bindings.length; i++) if (bindings[i].dirty || bindings[i].saving) await flush(bindings[i]);
++    for(var value of external.values())if((value.dirty||value.saving)&&value.flush)await value.flush();
++  }
++  function notifyConfig(config) {
++    latestConfig = config;
++    bindings.forEach(function (b) {
++      if (!b.apply || b.saving) return;
++      if(b.section && same(b.remoteSection,config[b.section]))return;
++      if(b.section)b.remoteSection=copy(config[b.section]);
++      var local = diff(b.baseline, b.read());
++      if(b.atomicArray && local!==undefined)return;
++      // Apply the newest server state, then restore only fields edited locally.
++      b.apply(config);
++      var serverValue = copy(b.read());
++      if (local !== undefined) b.apply(merge(serverValue, local));
++      b.baseline = serverValue;
++      b.dirty = diff(serverValue, b.read()) !== undefined;
++      remember(b);
++    });
++    listeners.forEach(function (fn) { try { fn(config); } catch (e) { A.toast(e.message, 'err'); } });
++    status();
++  }
++  async function pull() {
++    if (pulling) { pullAgain = true; return; }
++    pulling = true;
++    try { notifyConfig(await A.api.get('/api/config', 8000)); }
++    catch (e) { /* Connection state is reported by status polling. Pending edits remain. */ }
++    finally { pulling = false; if (pullAgain) { pullAgain = false; schedulePull(); } }
++  }
++  function schedulePull() { clearTimeout(pullTimer); pullTimer = setTimeout(pull, 180); }
++  A.onLog(function (e) { if (e.type === 'config' && e.revision !== revision) { revision = e.revision; schedulePull(); } });
++  setInterval(async function () {
++    if (document.hidden) return;
++    try {
++      var data = await A.api.get('/api/config/revision', 5000);
++      if (data.revision !== revision) { revision = data.revision; schedulePull(); }
++    } catch (e) { /* Existing connection status remains authoritative. */ }
++    bindings.forEach(function(b){if(!b.saving&&!b.dirty&&diff(b.baseline,b.read())!==undefined)schedule(b);});
++    clearTimeout(retryTimer);
++    if (navigator.onLine && bindings.some(function (b) { return b.error && b.dirty; })) retryTimer = setTimeout(function () { flushAll().catch(function () {}); }, 1000);
++  }, 2500);
++  window.addEventListener('online', function () { flushAll().catch(function () {}); schedulePull(); });
++  document.addEventListener('visibilitychange', function () { if (!document.hidden) { A.refreshStatus(); schedulePull(); } });
++  window.addEventListener('beforeunload', function (e) {
++    if (bindings.concat(Array.from(external.values())).some(function (b) { return b.dirty || b.saving; })) { flushAll().catch(function () {}); e.preventDefault(); e.returnValue = ''; }
++  });
++  async function preferences(fields, name) {
++    var page=name||document.body.dataset.page, config=await A.api.get('/api/config');
++    function read(){var values={};fields.forEach(function(id){var n=A.el(id);if(n&&n.type!=='password'&&n.type!=='file')values[id]=n.type==='checkbox'?n.checked:n.value;});var result={ui_preferences:{}};result.ui_preferences[page]=values;return result;}
++    function apply(c){var values=(c.ui_preferences||{})[page]||{};fields.forEach(function(id){var n=A.el(id);if(!n||values[id]===undefined)return;if(n.type==='checkbox')n.checked=!!values[id];else if(n.tagName!=='SELECT'||Array.from(n.options).some(function(o){return o.value===String(values[id]);}))n.value=values[id];});}
++    apply(config);return bind({id:'preferences:'+page,root:'#page',read:read,apply:apply,validate:function(){fields.forEach(function(id){var n=A.el(id);if(n&&!n.checkValidity())throw new Error('请检查输入参数的数值范围');});}});
++  }
++  A.autosave = {preferences:preferences,track:function(id,values){external.set(id,Object.assign(external.get(id)||{},values));status();},mount: mount, bind: bind, form: form, write: write, flush: flushAll, changed: schedule, pull: pull,
++    onConfig: function (fn) { listeners.push(fn); if (latestConfig) fn(latestConfig); },
++    state: function () { return bindings.map(function (b) { return {id:b.id, dirty:b.dirty, saving:!!b.saving, error:b.error}; }); },
++    diff: diff, merge: merge};
++  A.saveConfig = write;
++})();
+--- /dev/null
++++ b/frontend/static/js/dataset-features.js
+@@ -0,0 +1,17 @@
++(function(){
++ 'use strict';var A=window.APP,timer,request=0;
++ async function check(){
++  var box=A.el('datasetFeatures'),repo=A.el('l_repo_id').value,dir=A.el('l_dataset_dir').value,id=++request;
++  if(!repo&&!dir){box.textContent='请选择已采集的数据集。';return;}
++  box.textContent='正在读取数据集特征…';box.className='hint';
++  try{var r=await A.api.get('/api/datasets/features?repo_id='+encodeURIComponent(repo)+'&dataset_dir='+encodeURIComponent(dir));if(id!==request)return;
++    if(!r.found){box.textContent=r.note;box.className='hint warn';return;}
++    box.textContent='动作 '+r.action_dim+' 维 · 状态 '+r.state_dim+' 维 · '+r.total_episodes+' 集 · 相机：'+((r.cameras||[]).join('、')||'无')+(A.isDual()&&r.action_dim!==14?'。当前双臂方案预期 14 维动作，请核对所选数据。':'');
++    box.className='hint '+(A.isDual()&&r.action_dim!==14?'warn':'ok');
++  }catch(e){if(id===request){box.textContent='特征检查失败：'+e.message;box.className='hint err';}}
++ }
++ function schedule(){clearTimeout(timer);timer=setTimeout(check,650);}
++ A.click('btnCheckFeatures',function(){A.action(check,'#trainAlert');});
++ ['l_repo_id','l_dataset_dir'].forEach(function(id){['input','change'].forEach(function(e){A.el(id).addEventListener(e,schedule);});});
++ A.autosave.onConfig(schedule);A.onStatus(function(){if(!timer)schedule();});setTimeout(check,1500);
++})();
+--- a/frontend/static/js/home.js
++++ b/frontend/static/js/home.js
+@@ -17,7 +17,7 @@
+     if (!s) return;
+     var connectLink = A.el('homeConnectLink');
+     if (connectLink) {
+-      connectLink.href = s.dual_arm && s.dual_arm.enabled ? '/p/dual' : '/p/connect';
++      connectLink.href = '/p/connect';
+       connectLink.removeAttribute('aria-disabled'); connectLink.removeAttribute('tabindex');
+     }
+     kv("kvEnv", [
+--- a/frontend/static/js/eval.js
++++ b/frontend/static/js/eval.js
+@@ -54,7 +54,7 @@
+   A.el("evalForm").addEventListener("submit", function (e) {
+     e.preventDefault();
+     A.action(async function () {
+-      await A.saveConfig({ eval: A.formData(A.el("evalForm")) });
++      await A.autosave.flush();
+       A.ok("评估参数已保存", "#evalAlert");
+     }, "#evalAlert");
+   });
+@@ -68,6 +68,7 @@
+   A.click("btnNewEvalName", function () {
+     var el = A.q('#evalForm [name="repo_id"]');
+     if (el) el.value = evalRepoDefault();
++    if (el) el.dispatchEvent(new Event("change", {bubbles:true}));
+     A.ok("已生成新的评估数据集名：" + (el ? el.value : ""), "#evalAlert");
+   });
+   A.click("btnEval", function () {
+@@ -103,4 +104,7 @@
+   });
+ 
+   await loadConfig();
++  A.autosave.form('evalForm','eval');
++  A.autosave.onConfig(function(){A.commandPreview('eval','#workflowCommand');});
++  A.commandPreview('eval','#workflowCommand');
+ })();
+--- a/frontend/static/js/arm.js
++++ b/frontend/static/js/arm.js
+@@ -187,4 +187,5 @@
+   });
+ 
+   // Hardware state is read only after the user explicitly chooses to connect.
++  A.autosave.preferences(['gripForce']);
+ })();
+--- a/frontend/static/js/camera.js
++++ b/frontend/static/js/camera.js
+@@ -3,7 +3,8 @@
+   'use strict';
+   var A = window.APP;
+   await A.init({ active: 'camera', title: '摄像头', subtitle: '多路视觉 · 设备与实时画面' });
+-  var cameras = [], devices = [], serial = 0, editing = null, dirty = false, saving = false;
++  var cameras = [], devices = [], serial = 0, editing = null, dirty = false, saving = false, cameraBinding=null, cameraSaveError="";
++  var resumeAfterSave = new Set(), desired=new Set(), reconnectTimers=new Map(), retries=new Map(), frameSeen=new Map();
+   var running = new Set(), pending = new Set(), streamTimers = new Map();
+   var grid = A.el('camGrid'), dialog = A.el('cameraDialog');
+   function key(source) {
+@@ -15,13 +16,16 @@
+   function sourceLabel(c) { return /^\d+$/.test(String(c.index_or_path)) ? '/dev/video' + c.index_or_path : c.index_or_path; }
+   function state() {
+     A.el('camState').textContent = cameras.length + ' 路配置 · ' + running.size + ' 路预览';
+-    A.el('saveState').textContent = dirty ? '有未保存的更改' : '配置已保存';
++    A.el('saveState').textContent = cameraSaveError ? '自动保存失败，内容已保留' : dirty ? '正在自动保存…' : '配置已自动保存';
+     A.el('btnSaveCam').disabled = !dirty || saving;
+-    A.el('btnSaveCam').textContent = saving ? '保存中…' : '保存配置';
+-  }
+-  function setDirty() { dirty = true; state(); }
++    A.el('btnSaveCam').textContent = '重试保存';
++    A.el('btnSaveCam').hidden = !cameraSaveError;
++  }
++  function setDirty() { dirty = true; state(); if(cameraBinding)cameraBinding.changed(); }
+   function tile(id) { return grid.querySelector('[data-camera="' + id + '"]'); }
+-  function stop(c) {
++  function stop(c, preserveIntent) {
++    clearTimeout(reconnectTimers.get(c._id)); reconnectTimers.delete(c._id);
++    if(!preserveIntent){desired.delete(c._id);retries.delete(c._id);}
+     var t = tile(c._id);
+     clearTimeout(streamTimers.get(c._id)); streamTimers.delete(c._id);
+     if (t) {
+@@ -35,20 +39,24 @@
+   }
+   async function failed(c, message) {
+     if (!running.has(c._id)) return;
+-    stop(c);
++    stop(c,true);
+     var t = tile(c._id); if (!t) return;
+     t.querySelector('[data-state]').textContent = '连接失败'; t.querySelector('[data-state]').className = 'badge err';
+     t.querySelector('.camera-placeholder p').textContent = message || '设备未返回画面，请检查连接后重试';
+-    t.querySelector('[data-toggle]').textContent = '重试预览';
++    t.querySelector('[data-toggle]').textContent = '立即重试';
++    var attempts=(retries.get(c._id)||0)+1;retries.set(c._id,attempts);
++    var seconds=Math.min(30,Math.pow(2,Math.min(attempts,5)));
++    t.querySelector('[data-state]').textContent='离线 · '+seconds+' 秒后重连';
++    reconnectTimers.set(c._id,setTimeout(function(){if(desired.has(c._id)&&cameras.indexOf(c)>=0)start(c,true);},seconds*1000));
+     try {
+       var s = await A.api.get('/api/cameras/status');
+       var detail = s.sessions.find(function (s) { return s.device === key(c.index_or_path); });
+       if (detail && detail.error && t.isConnected) t.querySelector('.camera-placeholder p').textContent = detail.error;
+     } catch (e) { /* The inline connection error remains visible. */ }
+   }
+-  function start(c) {
+-    if (saving || pending.has(c._id) || (c.type || 'opencv') !== 'opencv') return;
+-    stop(c); var t = tile(c._id); if (!t) return;
++  function start(c, retry) {
++    if (pending.has(c._id) || (c.type || 'opencv') !== 'opencv') return;
++    stop(c,!!retry); desired.add(c._id); var t = tile(c._id); if (!t) return;
+     running.add(c._id); state();
+     var img = t.querySelector('img'), placeholder = t.querySelector('.camera-placeholder');
+     t.querySelector('[data-state]').textContent = '连接中';
+@@ -57,7 +65,7 @@
+     img.hidden = false;
+     img.onload = function () {
+       if (!running.has(c._id)) return;
+-      clearTimeout(streamTimers.get(c._id)); placeholder.hidden = true;
++      clearTimeout(streamTimers.get(c._id)); placeholder.hidden = true; retries.delete(c._id);
+       t.querySelector('[data-state]').textContent = '实时画面'; t.querySelector('[data-state]').className = 'badge ok';
+     };
+     img.onerror = function () { failed(c); };
+@@ -95,9 +103,8 @@
+     } finally { b.disabled = false; }
+   }
+   function openEditor(c) {
+-    if (saving) return;
+     editing = c || null; var defaults = c || {name: '', index_or_path: '', width: 640, height: 480, fps: 30, fourcc: 'MJPG', type: 'opencv', preview: true};
+-    A.el('cameraDialogTitle').textContent = c ? '相机设置' : '添加相机';
++    A.el('cameraDialogTitle').textContent = c ? '相机设置 · 自动保存' : '添加相机';
+     A.clearAlert('#dialogAlert');
+     var available = devices.filter(function (d) { return !cameras.some(function (other) { return other !== c && key(other.index_or_path) === d.path; }); });
+     A.el('devicePicker').innerHTML = '<option value="">手动填写设备路径</option>' + available.map(function (d) {
+@@ -117,6 +124,7 @@
+   dialog.addEventListener('click', function (e) { if (e.target === dialog) { var r = dialog.getBoundingClientRect(); if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) dialog.close(); } });
+   A.el('cameraForm').onsubmit = function (e) {
+     e.preventDefault(); A.clearAlert('#dialogAlert');
++    if(editing){editChanged();if(!A.el('dialogAlert').textContent)dialog.close();return;}
+     var source = A.el('camSource').value.trim(), name = A.el('camName').value.trim();
+     if (cameras.some(function (c) { return c !== editing && (c.name === name || key(c.index_or_path) === key(source)); })) { A.setAlert('#dialogAlert', '相机名称或物理设备已在列表中，请选择其他设备', 'err'); return; }
+     var c = Object.assign({}, editing || {}, {name: name, index_or_path: /^\d+$/.test(source) ? Number(source) : source,
+@@ -124,33 +132,20 @@
+       type: A.el('camType').value, fourcc: A.el('camFourcc').value.trim().toUpperCase(), preview: A.el('camPreview').checked});
+     if (editing) { stop(editing); cameras[cameras.indexOf(editing)] = c; }
+     else { c._id = ++serial; cameras.push(c); }
+-    pending.add(c._id); setDirty(); dialog.close(); render(); A.el('btnSaveCam').focus();
++    pending.add(c._id); if(c.preview!==false)resumeAfterSave.add(c._id); setDirty(); dialog.close(); render(); A.el('btnAddCam').focus();
+   };
+   A.el('btnDiscover').onclick = function () { A.action(function () { return discover(true); }, '#camAlert'); };
+   A.el('btnAddCam').onclick = function () { openEditor(); };
+-  A.el('btnSaveCam').onclick = async function () {
+-    if (!dirty || saving) return;
+-    saving = true; state();
+-    // Freeze editing while committing a snapshot of the configuration.
+-    ['btnAddCam', 'btnPreviewAll', 'btnPauseAll'].forEach(function (id) { A.el(id).disabled = true; }); grid.querySelectorAll('button').forEach(function (b) { b.disabled = true; });
+-    var intent = cameras.filter(function (c) { return running.has(c._id) || (pending.has(c._id) && c.preview !== false); }).map(function (c) { return c._id; });
+-    cameras.forEach(stop);
+-    try {
+-      var saved = cameras.map(function (c) { var clean = Object.assign({}, c); delete clean._id; return clean; });
+-      await A.saveConfig({cameras: saved}); dirty = false; pending.clear(); A.clearAlert('#camAlert'); A.toast('相机配置已保存', 'ok');
+-      intent.forEach(function (id) { running.add(id); });
+-    } catch (e) { A.setAlert('#camAlert', e.message, 'err'); }
+-    finally { saving = false; ['btnAddCam', 'btnPreviewAll', 'btnPauseAll'].forEach(function (id) { A.el(id).disabled = false; }); render(); }
+-  };
+-  A.el('btnPreviewAll').onclick = function () { cameras.forEach(start); };
+-  A.el('btnPauseAll').onclick = function () { cameras.forEach(stop); };
++  A.el('btnSaveCam').onclick = function(){cameraBinding.flush().catch(function(){});};
++  A.el('btnPreviewAll').onclick = function () { cameras.forEach(function(c){start(c);}); };
++  A.el('btnPauseAll').onclick = function () { cameras.forEach(function(c){stop(c);}); };
+   grid.onclick = function (e) {
+     var b = e.target.closest('button'); if (!b) return;
+     if (b.hasAttribute('data-empty-add')) { openEditor(); return; }
+     var box = b.closest('[data-camera]'), c = cameras.find(function (c) { return String(c._id) === box.dataset.camera; });
+     if (b.hasAttribute('data-toggle')) { if (running.has(c._id)) stop(c); else start(c); }
+     if (b.hasAttribute('data-edit')) openEditor(c);
+-    if (b.hasAttribute('data-remove')) A.confirm('从配置列表移除「' + c.name + '」？保存后生效。', {title: '移除相机'}).then(function (yes) {
++    if (b.hasAttribute('data-remove')) A.confirm('移除相机「' + c.name + '」？更改会自动保存。', {title: '移除相机'}).then(function (yes) {
+       if (!yes || saving) return; stop(c); cameras.splice(cameras.indexOf(c), 1); pending.delete(c._id); setDirty(); render();
+     });
+     if (b.hasAttribute('data-snapshot')) A.action(async function () {
+@@ -166,7 +161,7 @@
+   };
+   ['Opencv:opencv','Realsense:realsense','Orbbec:orbbec'].forEach(function (p) {
+     var parts = p.split(':'); A.click('btnScan' + parts[0], function () { A.action(async function () {
+-      cameras.forEach(stop); await A.api.post('/api/cameras/scan', {backend: parts[1]}); A.toast('扫描已启动，可在任务日志查看结果', 'ok');
++      cameras.forEach(function(c){stop(c);}); await A.api.post('/api/cameras/scan', {backend: parts[1]}); A.toast('扫描已启动，可在任务日志查看结果', 'ok');
+     }, '#camAlert'); });
+   });
+   A.click('btnOrbUdev', function () { A.action(async function () {
+@@ -182,13 +177,54 @@
+       img.dataset.url = URL.createObjectURL(await r.blob()); img.src = img.dataset.url; img.hidden = false;
+     } finally { b.disabled = false; }
+   }, '#camAlert'); });
++  function clean(c){var out=Object.assign({},c);delete out._id;return out;}
++  function profile(c){return JSON.stringify([key(c.index_or_path),c.type,c.width,c.height,c.fps,c.fourcc]);}
++  function refreshCards(){
++    var current=Array.from(grid.querySelectorAll('[data-camera]')).map(function(n){return Number(n.dataset.camera);});
++    if(JSON.stringify(current)!==JSON.stringify(cameras.map(function(c){return c._id;}))){render();return;}
++    cameras.forEach(function(c){var t=tile(c._id);t.querySelector('[data-toggle]').disabled=pending.has(c._id)||(c.type||'opencv')!=='opencv';t.querySelector('[data-snapshot]').disabled=pending.has(c._id)||(c.type||'opencv')!=='opencv';t.querySelector('h3').textContent=c.name;t.querySelector('.camera-source').textContent=sourceLabel(c);t.querySelector('.camera-meta').textContent=c.width+' × '+c.height+' · 采集 '+c.fps+' FPS · '+(c.fourcc||'MJPG');});
++  }
++  function applyCameraConfig(cfg){
++    var next=cfg.cameras||[], previous=cameras.slice(), restart=[];
++    previous.forEach(function(c){if(!next.some(function(n){return key(n.index_or_path)===key(c.index_or_path);}))stop(c);});
++    cameras=next.map(function(c){var old=previous.find(function(n){return key(n.index_or_path)===key(c.index_or_path);});
++      if(old){if(profile(old)!==profile(c)&&running.has(old._id)){stop(old);restart.push(old._id);}Object.assign(old,c);return old;}
++      return Object.assign({},c,{_id:++serial});});
++    refreshCards();restart.forEach(function(id){var c=cameras.find(function(c){return c._id===id;});if(c)start(c);});state();
++  }
++  function editChanged(){
++    if(!editing)return;
++    var form=A.el('cameraForm');if(!form.checkValidity()){A.setAlert('#dialogAlert','请填写有效参数，修正后会自动保存','warn');return;}
++    var source=A.el('camSource').value.trim(),name=A.el('camName').value.trim();
++    if(!name||cameras.some(function(c){return c!==editing&&(c.name===name||key(c.index_or_path)===key(source));})){A.setAlert('#dialogAlert','名称或物理设备重复，当前更改尚未保存','warn');return;}
++    var next=Object.assign({},editing,{name:name,index_or_path:/^\d+$/.test(source)?Number(source):source,width:Number(A.el('camWidth').value),height:Number(A.el('camHeight').value),fps:Number(A.el('camFps').value),type:A.el('camType').value,fourcc:A.el('camFourcc').value.trim().toUpperCase(),preview:A.el('camPreview').checked});
++    if(profile(next)!==profile(editing)){if(running.has(editing._id))resumeAfterSave.add(editing._id);stop(editing);pending.add(editing._id);}
++    Object.assign(editing,next);A.clearAlert('#dialogAlert');refreshCards();setDirty();
++  }
++  ['input','change'].forEach(function(event){A.el('cameraForm').addEventListener(event,editChanged);});
++  setInterval(async function(){
++    if(document.hidden||!running.size)return;
++    try{var info=await A.api.get('/api/cameras/status',6000);cameras.forEach(function(c){if(!running.has(c._id)||pending.has(c._id))return;
++      var session=info.sessions.find(function(s){return s.device===key(c.index_or_path);});if(!session)return;
++      if(session.error||!session.active){failed(c,session.error||'设备连接已结束，正在重新连接');return;}
++      var seen=frameSeen.get(c._id);if(!seen||seen.frames!==session.frames)frameSeen.set(c._id,{frames:session.frames,at:Date.now()});
++      else if(Date.now()-seen.at>8000)failed(c,'连续 8 秒未收到新画面，正在重新连接');
++    });}catch(e){/* Server connection status appears in the global header. */}
++  },2000);
+   window.addEventListener('beforeunload', function (e) { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
+-  window.addEventListener('pagehide', function () { cameras.forEach(stop); });
++  window.addEventListener('pagehide', function () { cameras.forEach(function(c){stop(c);}); });
+   try {
+     var results = await Promise.allSettled([A.api.get('/api/config'), discover(false)]);
+     if (results[0].status !== 'fulfilled') throw results[0].reason;
+     if (results[1].status !== 'fulfilled') A.setAlert('#camAlert', '设备扫描失败，可手动填写路径：' + results[1].reason.message, 'warn');
+     cameras = (results[0].value.cameras || []).map(function (c) { return Object.assign({}, c, {_id: ++serial}); });
+-    render(); cameras.filter(function (c) { return c.preview !== false; }).forEach(start);
++    cameraBinding=A.autosave.bind({id:'cameras',atomicArray:true,read:function(){return {cameras:cameras.map(clean)};},apply:applyCameraConfig,
++      write:async function(delta,full){saving=true;cameraSaveError='';state();
++        try{await A.saveConfig({cameras:full.cameras});
++          cameras.forEach(function(c){if(full.cameras.some(function(row){return JSON.stringify(row)===JSON.stringify(clean(c));})){pending.delete(c._id);if(resumeAfterSave.has(c._id)){resumeAfterSave.delete(c._id);start(c);}}});
++          dirty=JSON.stringify(cameras.map(clean))!==JSON.stringify(full.cameras);
++        }catch(e){cameraSaveError=e.message;throw e;}finally{saving=false;refreshCards();state();}
++      }});
++    render(); cameras.filter(function (c) { return c.preview !== false; }).forEach(function(c){start(c);});
+   } catch (e) { A.setAlert('#camAlert', e.message, 'err'); grid.innerHTML = '<div class="camera-empty">配置加载失败，请刷新页面重试。</div>'; }
+ })();
+--- a/frontend/static/js/train.js
++++ b/frontend/static/js/train.js
+@@ -7,7 +7,7 @@
+ 
+   var backends = [];
+   var selected = "lerobot";
+-  var losses = [];
++  var losses = [], trainAutosave = null;
+ 
+   function draw() {
+     // 训练日志的 step 会重复（同一步打多条 loss），直接按 step 画会并点。
+@@ -34,8 +34,9 @@
+   }
+   function str(id) { return A.el(id).value.trim(); }
+ 
+-  function buildParams() {
+-    if (selected === "lerobot") {
++  function buildParams(engine) {
++    engine = engine || selected;
++    if (engine === "lerobot") {
+       return {
+         repo_id: str("l_repo_id"), policy_type: str("l_policy_type") || "act",
+         dataset_dir: str("l_dataset_dir"), base_model: str("l_base_model"),
+@@ -45,7 +46,7 @@
+         video_backend: str("l_video_backend")
+       };
+     }
+-    if (selected === "yolo") {
++    if (engine === "yolo") {
+       return {
+         data_yaml: str("y_data_yaml"), dataset_dir: str("y_dataset_dir"),
+         model: str("y_model") || "yolov8n.pt", epochs: num("y_epochs", 50),
+@@ -127,7 +128,7 @@
+             : '<span class="badge err">依赖缺失</span>') + "</div></div>";
+       }).join("");
+       A.qa("#engineCards .radio-card").forEach(function (c) {
+-        c.onclick = function () { selectEngine(c.dataset.key); };
++        c.onclick = function () { selectEngine(c.dataset.key); if(trainAutosave)trainAutosave.changed(); };
+       });
+       selectEngine(selected);
+       if (!quiet) A.ok("训练引擎依赖已重新检测");
+@@ -211,15 +212,7 @@
+     A.el("hfCustomWrap").style.display = mode === "custom" ? "" : "none";
+   }
+ 
+-  A.change("hfMode", function () {
+-    A.el("hfCustomWrap").style.display = A.el("hfMode").value === "custom" ? "" : "none";
+-    A.action(function () { return saveHf().then(function () { return updateModelCacheStatus(); }); }, "#trainAlert");
+-  });
+-  A.change("hfEndpoint", function () {
+-    if (A.el("hfMode").value === "custom") {
+-      A.action(function () { return saveHf().then(function () { return updateModelCacheStatus(); }); }, "#trainAlert");
+-    }
+-  });
++  A.change('hfMode',function(){A.el('hfCustomWrap').style.display=A.el('hfMode').value==='custom'?'':'none';});
+   A.click("btnHfTest", function () {
+     A.action(async function () {
+       A.el("hfStatus").textContent = "正在检测 huggingface.co 与 hf-mirror.com（最多 8 秒）…";
+@@ -560,28 +553,6 @@
+   A.click("btnFillDs", function () {
+     A.action(function () { return syncDatasetDirFromRepo(true); }, "#trainAlert");
+   });
+-  function autoSaveTrain() {
+-    try {
+-      var p = buildParams();
+-      var section = selected === "lerobot" ? "train" : selected;
+-      var body = {};
+-      body[section] = Object.assign({}, p);
+-      if (selected === "lerobot") body[section].backend = "lerobot";
+-      A.api.post("/api/config", body).catch(function () {});
+-    } catch (e) { /* ignore */ }
+-  }
+-  var _autoTrainTimer = null;
+-  function autoSaveTrainDebounced() {
+-    clearTimeout(_autoTrainTimer);
+-    _autoTrainTimer = setTimeout(autoSaveTrain, 700);
+-  }
+-  ["params-lerobot", "params-yolo", "params-opencv"].forEach(function (id) {
+-    var box = A.el(id);
+-    if (!box) return;
+-    box.addEventListener("change", autoSaveTrainDebounced);
+-    box.addEventListener("input", autoSaveTrainDebounced);
+-  });
+-
+   A.click("btnClearLoss", function () { losses = []; draw(); });
+   A.click("btnReloadCkpt", function () { loadCheckpoints(); });
+ 
+@@ -609,4 +580,25 @@
+   await loadBackends(true);
+   await loadDatasets();
+   await loadCheckpoints();
++
++  function applyTraining(c) {
++    var maps={train:{repo_id:'l_repo_id',policy_type:'l_policy_type',dataset_dir:'l_dataset_dir',base_model:'l_base_model',steps:'l_steps',batch_size:'l_batch_size',device:'l_device',output_dir:'l_output_dir',job_name:'l_job_name',wandb:'l_wandb',video_backend:'l_video_backend'},
++      yolo:{data_yaml:'y_data_yaml',dataset_dir:'y_dataset_dir',model:'y_model',epochs:'y_epochs',imgsz:'y_imgsz',batch:'y_batch',device:'y_device',output_dir:'y_output_dir'},
++      opencv:{dataset_dir:'o_dataset_dir',classifier:'o_classifier',epochs:'o_epochs',img_size:'o_img_size',output_dir:'o_output_dir'}};
++    Object.keys(maps).forEach(function(section){var values=c[section]||{};Object.keys(maps[section]).forEach(function(key){
++      if(values[key]===undefined)return;var n=A.el(maps[section][key]);
++      if(n.type==='checkbox')n.checked=!!values[key];
++      else if(n.tagName!=='SELECT'||Array.from(n.options).some(function(o){return o.value===String(values[key]);})){if(n.value!==String(values[key]))n.value=values[key];}
++    });});
++    if(c.train&&['lerobot','yolo','opencv'].indexOf(c.train.backend)>=0)selectEngine(c.train.backend);
++  }
++  trainAutosave=A.autosave.bind({id:'training',root:'#page',
++    read:function(){return {train:Object.assign({backend:selected},buildParams('lerobot')),yolo:buildParams('yolo'),opencv:buildParams('opencv')};},
++    apply:applyTraining,
++    validate:function(){A.qa('#params-'+selected+' input[type=number]').forEach(function(n){if(!n.checkValidity()||n.value==='')throw new Error('请填写有效的训练数值；默认批大小可填 0');});}
++  });
++  A.autosave.onConfig(function(){A.commandPreview('train','#trainCommandPreview');});
++  A.el('hfMode').closest('.card').id='hfSettings';
++  A.autosave.bind({id:'hf-source',section:'hf',root:'#hfSettings',read:function(){return {hf:{endpoint:hfEndpointValue(),auto:A.el('hfMode').value==='auto'}};},apply:loadHf});
++  A.onLog(function(e){if(e.type==='state'&&e.running===false&&(!e.ts||e.ts>=Date.now()/1000-5))loadCheckpoints();});
+ })();
+--- a/frontend/static/js/dataset.js
++++ b/frontend/static/js/dataset.js
+@@ -105,13 +105,14 @@
+   A.el("recordForm").addEventListener("submit", function (e) {
+     e.preventDefault();
+     A.action(async function () {
+-      await A.saveConfig({ dataset: A.formData(A.el("recordForm")) });
++      await A.autosave.flush();
+       A.ok("采集参数已保存", "#dsAlert");
+     }, "#dsAlert");
+   });
+   A.click("btnRecord", function () {
+     A.action(async function () {
+       A.clearAlert("#dsAlert");
++      await A.autosave.flush();
+       await A.api.post("/api/record/start", {});
+       A.ok("采集任务已启动，录制窗口键盘控制见下方按钮", "#dsAlert");
+       A.refreshStatus();
+@@ -286,6 +287,9 @@
+     }
+   });
+ 
+-  loadConfig();
++  await loadConfig();
++  A.autosave.form('recordForm','dataset');
+   await loadDatasets(true);
++  A.autosave.onConfig(function(){A.commandPreview('record','#workflowCommand');});
++  A.commandPreview('record','#workflowCommand');
+ })();
+--- a/frontend/static/js/yolo.js
++++ b/frontend/static/js/yolo.js
+@@ -23,13 +23,8 @@
+       camera_index: parseInt(A.el("camIndex").value, 10) || 0
+     };
+   }
+-  var saveTimer = null;
+-  function saveYolo(now) {
+-    var patch = { yolo: collectYolo() };
+-    if (now) return A.api.post("/api/config", patch);
+-    clearTimeout(saveTimer);
+-    saveTimer = setTimeout(function () { A.api.post("/api/config", patch).catch(function () {}); }, 500);
+-  }
++  var yoloAutosave=null;
++  function saveYolo(now){if(yoloAutosave){yoloAutosave.changed();if(now)return yoloAutosave.flush();}}
+   async function loadConfig() {
+     try {
+       var c = await A.api.get("/api/config");
+@@ -96,6 +91,7 @@
+   }
+ 
+   async function loadDatasets(keepName) {
++    await autoSave(false);
+     try {
+       var r = await A.api.get("/api/yolo/datasets");
+       state.datasets = r.datasets || [];
+@@ -317,48 +313,43 @@
+ 
+   function syncText() { A.el("labelText").value = boxesToText(); }
+ 
+-  var autoTimer = null, dirty = false, saving = false;
+-  function setSaveState(t) { var el = A.el("saveState"); if (el) el.textContent = t; }
+-  function markDirty() {
+-    if (!state.img || !state.current) return;
+-    dirty = true;
+-    setSaveState("未保存（自动保存中…）");
+-    clearTimeout(autoTimer);
+-    autoTimer = setTimeout(function () { autoSave(false); }, 700);
+-  }
+-  async function autoSave(force) {
+-    if (!state.img || !state.current) return;
+-    if (!force && !dirty) return;
+-    if (saving) return;
+-    saving = true;
+-    var file = state.current, split = state.split;
+-    var text = A.el("labelText").value;
+-    try {
+-      await A.api.put(apiBase() + "/label", { split: split, file: file, text: text });
+-      dirty = false;
+-      var copied = split === "train" && !!text.trim();
+-      setSaveState((copied ? "已保存并复制到验证集 " : "已保存（验证集）") +
+-        new Date().toLocaleTimeString());
+-      state.images.forEach(function (it) { if (it.file === file) it.labeled = !!text.trim(); });
+-      renderImageList();
+-      if (copied) refreshCurrentDataset().catch(function () {});
+-    } catch (e) {
+-      setSaveState("自动保存失败：" + e.message);
+-    } finally {
+-      saving = false;
+-    }
+-  }
+-
++  var autoTimer=null,dirty=false,saving=null;
++  function setSaveState(t){A.el('saveState').textContent=t;}
++  function annotationStatus(error){A.autosave.track('yolo-label',{dirty:dirty,saving:!!saving,error:error||'',flush:function(){return autoSave(false);}});}
++  function draftKey(){return 'rebot.label.'+(state.ds?state.ds.name:'')+'.'+state.split+'.'+state.current;}
++  function keepLabelDraft(){try{sessionStorage.setItem(draftKey(),A.el('labelText').value);}catch(e){}}
++  function markDirty(){if(!state.img||!state.current)return;keepLabelDraft();dirty=true;setSaveState('正在自动保存…');annotationStatus();clearTimeout(autoTimer);autoTimer=setTimeout(function(){autoSave(false).catch(function(){});},600);}
++  async function autoSave(force){
++    if(saving){await saving;if(dirty||force)return autoSave(force);return;}
++    if(!state.img||!state.current||(!force&&!dirty))return;
++    var file=state.current,split=state.split,text=A.el('labelText').value,base=apiBase(),draft=draftKey();
++    keepLabelDraft();
++    var parsed=textToBoxes(text);if(parsed.errors.length){dirty=true;var invalid=new Error(parsed.errors.join('；'));annotationStatus(invalid.message);throw invalid;}
++    saving=A.api.put(base+'/label',{split:split,file:file,text:text});annotationStatus();
++    try{await saving;dirty=state.current===file&&A.el('labelText').value!==text;
++      try{if(sessionStorage.getItem(draft)===text)sessionStorage.removeItem(draft);}catch(e){}
++      setSaveState(dirty?'正在保存更新后的标注…':'已自动保存 · '+new Date().toLocaleTimeString());
++      state.images.forEach(function(it){if(it.file===file)it.labeled=!!text.trim();});renderImageList();
++    }catch(e){dirty=true;setSaveState('保存失败，标注已保留：'+e.message);annotationStatus(e.message);throw e;}
++    finally{saving=null;annotationStatus(dirty?'存在尚未保存的标注':'');}
++    if(dirty)return autoSave(false);
++  }
++
++  var imageRequest=0;
+   async function openImage(file) {
+     if (!state.ds) return;
+     await autoSave(false);
+     clearTimeout(autoTimer);
+     dirty = false;
+     state.current = file;
++    state.img = null;
++    var requestId=++imageRequest;
++    A.el("annotHint").hidden=false;A.el("annotHint").textContent="正在载入图片与标注…";
+     state.sel = -1;
+     renderImageList();
+     var img = new Image();
+     img.onload = async function () {
++      if(requestId!==imageRequest)return;
+       state.img = img;
+       var cv = A.el("annotCanvas");
+       cv.width = img.naturalWidth;
+@@ -370,9 +361,12 @@
+           "&file=" + encodeURIComponent(file));
+         text = r.text || "";
+       } catch (e) { /* 没标签就是空 */ }
++      if(requestId!==imageRequest)return;
++      var retained=null;try{retained=sessionStorage.getItem(draftKey());}catch(e){}
++      if(retained!==null)text=retained;
+       A.el("labelText").value = text.replace(/\s+$/, "");
+       state.boxes = textToBoxes(text).boxes;
+-      draw();
++      draw();if(retained!==null)markDirty();
+     };
+     img.onerror = function () { A.toast("图片加载失败：" + file, "err"); };
+     img.src = apiBase() + "/image?split=" + state.split + "&file=" + encodeURIComponent(file) +
+@@ -661,19 +655,8 @@
+     }, "#yoloAlert");
+   });
+   A.click("btnDsRefresh", function () { loadDatasets(); });
+-  A.el("splitSel").addEventListener("change", function () {
+-    state.split = this.value === "val" ? "val" : "train";
+-    A.store("yolo.split", state.split);
+-    loadImages();
+-  });
+-
+-  A.el("dsSelect").addEventListener("change", function () {
+-    var name = A.el("dsSelect").value;
+-    state.ds = state.datasets.filter(function (d) { return d.name === name; })[0] || null;
+-    A.store("yolo.ds", name);
+-    renderStats(); renderClasses(); renderSplitOptions();
+-    loadImages();
+-  });
++  A.el('splitSel').addEventListener('change',function(){var next=this.value==='val'?'val':'train';A.action(async function(){try{await autoSave(false);state.split=next;A.store('yolo.split',next);await loadImages();}catch(e){A.el('splitSel').value=state.split;throw e;}},'#yoloAlert');});
++  A.el('dsSelect').addEventListener('change',function(){var next=this.value;A.action(async function(){try{await autoSave(false);state.ds=state.datasets.find(function(d){return d.name===next;})||null;A.store('yolo.ds',next);renderStats();renderClasses();renderSplitOptions();await loadImages();}catch(e){if(state.ds)A.el('dsSelect').value=state.ds.name;throw e;}},'#yoloAlert');});
+   A.el("clsSel").addEventListener("change", function () {
+     state.prefCls = parseInt(this.value, 10) || 0;
+     A.store("yolo.cls", state.prefCls);
+@@ -927,4 +910,7 @@
+   await loadConfig();
+   await loadModels();
+   await loadDatasets();
++  A.autosave.preferences(['valRatio', 'dinoConf', 'dinoMax', 'valModel', 'valSource', 'valConf']);
++  yoloAutosave=A.autosave.bind({id:'yolo-settings',section:'yolo',root:'#page',read:function(){return {yolo:collectYolo()};},apply:function(c){var y=c.yolo||{};[['yModel','model'],['yEpochs','epochs'],['yImgsz','imgsz'],['yBatch','batch'],['yDevice','device'],['camIndex','camera_index']].forEach(function(pair){if(y[pair[1]]!==undefined)A.el(pair[0]).value=y[pair[1]];});}});
++  A.el('labelText').addEventListener('input',function(){if(!state.img)return;var parsed=textToBoxes(this.value);if(parsed.errors.length){keepLabelDraft();dirty=true;annotationStatus(parsed.errors.join('；'));return;}state.boxes=parsed.boxes;state.sel=-1;draw();markDirty();});
+ })();
+--- a/frontend/static/js/connect.js
++++ b/frontend/static/js/connect.js
+@@ -1,10 +1,8 @@
+-/* 串口与校准 */
+-(async function () {
+-  "use strict";
+-  var A = window.APP;
+-  await A.init({ active: "connect", title: "串口与校准", subtitle: "串口授权、主从臂连接与机械臂校准" });
+-  A.attachLogPanel(A.el("logPanel"));
+-
++/* Device mode, ports and calibration live together; configuration autosaves. */
++(async function(){
++ 'use strict';
++ var A=window.APP;
++ await A.init({active:'connect',title:'设备连接与校准',subtitle:'单臂 / 双臂配置 · 串口连接 · 分别校准'});
+   /* Windows：COM 端口由驱动提供，没有 sudo / chmod；本页改为「串口检测」 */
+   var winMode = !!(A.status() && A.status().is_windows);
+   function applyConnWinUI() {
+@@ -55,178 +53,107 @@
+     }
+   }
+ 
++  var cfg = {}, activeDual = false, ports = [], binding = null, ready = false;
++  var ids = ['leaderPort','followerPort','left_follower','left_leader','right_follower','right_leader'];
++  function value(id) { return A.el(id).value.trim(); }
++  function put(id, value) { var n = A.el(id); var v = String(value === undefined ? '' : value); if (n.value !== v) n.value = v; }
++  function ratio(id) { return Number(A.el(id).value); }
++  function sidePayload(side) {
++    return {follower_port:value(side+'_follower'), leader_port:value(side+'_leader'),
++      follower_type:value(side+'FollowerType'), follower_id:value(side+'FollowerId'),
++      leader_type:value(side+'LeaderType'), leader_id:value(side+'LeaderId'),
++      can_adapter:value(side+'Can'), gripper_torque_ratio:ratio(side+'GripForce')};
++  }
++  function readDevices() {
++    return {dual_arm:{enabled:value('robotMode')==='dual', robot_type:value('dualRobotType'),teleop_type:value('dualTeleopType'),
++      left_prefix:value('leftPrefix'),right_prefix:value('rightPrefix'),left:sidePayload('left'),right:sidePayload('right')},
++      follower:{id:value('followerId'),port:value('followerPort'),can_adapter:value('singleCan'),gripper_torque_ratio:ratio('singleGripForce')},
++      leader:{id:value('leaderId'),port:value('leaderPort')}};
++  }
++  function fillPort(id, saved) {
++    var n=A.el(id), selected=saved===undefined?n.value:String(saved||'');
++    n.innerHTML='<option value="">选择串口</option>'+ports.map(function(p){return '<option value="'+A.esc(p.device)+'">'+A.esc(p.device+' · '+(p.description||'未知设备'))+'</option>';}).join('');
++    if(selected&&!ports.some(function(p){return p.device===selected;}))n.insertAdjacentHTML('beforeend','<option value="'+A.esc(selected)+'">'+A.esc(selected+'（当前未发现）')+'</option>');
++    n.value=selected;
++  }
++  function applyDevices(c) {
++    var d=c.dual_arm||{}, f=c.follower||{}, l=c.leader||{};
++    put('robotMode',d.enabled?'dual':'single');
++    [['dualRobotType',d.robot_type],['dualTeleopType',d.teleop_type],['leftPrefix',d.left_prefix||'left_arm'],['rightPrefix',d.right_prefix||'right_arm'],
++     ['followerId',f.id],['leaderId',l.id],['singleCan',f.can_adapter||'damiao'],['singleGripForce',f.gripper_torque_ratio===undefined?.12:f.gripper_torque_ratio]].forEach(function(p){put(p[0],p[1]);});
++    fillPort('leaderPort',l.port);fillPort('followerPort',f.port);
++    ['left','right'].forEach(function(side){var v=d[side]||{};fillPort(side+'_follower',v.follower_port);fillPort(side+'_leader',v.leader_port);
++      [['FollowerId',v.follower_id],['FollowerType',v.follower_type],['LeaderId',v.leader_id],['LeaderType',v.leader_type],['Can',v.can_adapter||'damiao'],['GripForce',v.gripper_torque_ratio===undefined?.12:v.gripper_torque_ratio]].forEach(function(p){put(side+p[0],p[1]);});});
++    paint();
++  }
++  function paint() {
++    if(!ready)return;
++    var selected=value('robotMode')==='dual', s=A.status()||{}, connected=activeDual?!!s.dual_connected:!!s.connected;
++    A.qa('[data-mode]').forEach(function(n){n.hidden=n.dataset.mode!==(selected?'dual':'single');});
++    A.el('currentMode').textContent='当前：'+(activeDual?'双臂':'单臂');
++    A.el('connectionTitle').textContent=selected?'左右主从臂连接':'主从臂连接';
++    A.el('modeHint').textContent=selected!==activeDual?'正在应用模式，完成后请重新连接设备…':'模式与设备参数自动保存；更换控制对象后需要重新连接。';
++    A.el('connState').textContent=connected?'已连接':'未连接';A.el('connState').className='badge '+(connected?'ok':'');
++    A.el('btnConnect').textContent=selected?'连接四路串口':'连接主从臂';
++    A.el('btnConnect').disabled=selected!==activeDual||!!s.running;
++    A.el('btnDisconnect').disabled=!connected||!!s.running;
++    A.el('robotMode').disabled=!!s.running;
++    A.qa('[data-calibrate]').forEach(function(b){b.disabled=!connected||!!s.running||selected!==activeDual;});
++  }
++  function renderPorts() {
++    var labels={leaderPort:'主臂',followerPort:'从臂',left_follower:'左从臂',left_leader:'左主臂',right_follower:'右从臂',right_leader:'右主臂'};
++    var visibleIds=value('robotMode')==='dual'?ids.slice(2):ids.slice(0,2);
++    A.el('portCount').textContent='· '+ports.length+' 个';
++    A.q('#portTable tbody').innerHTML=ports.map(function(p){return '<tr><td><code>'+A.esc(p.device)+'</code></td><td>'+A.esc(p.description||'-')+'</td><td><span class="badge '+(p.writable?'ok':'err')+'">'+(p.writable?'可读写':'无权限')+'</span></td><td>'+A.esc(visibleIds.filter(function(id){return value(id)===p.device;}).map(function(id){return labels[id];}).join('、')||'未分配')+'</td></tr>';}).join('')||'<tr><td colspan="4">未发现外接串口设备</td></tr>';
++  }
+   async function loadPorts(quiet) {
+-    var tbody = A.q("#portTable tbody");
+-    var ids = ["leaderPort", "followerPort"];
+-    A.showLoading(tbody, {
+-      title: "正在扫描串口…", detail: "正在读取 /api/ports 的真实设备列表", rows: 3
+-    });
+-    ids.forEach(function (id) {
+-      A.showLoading(id, { title: "正在加载串口列表…", detail: "扫描完成后可选主从臂" });
+-    });
+-    try {
+-      var r = await A.api.get("/api/ports");
+-      if (r.ports.length) {
+-        tbody.innerHTML = r.ports.map(function (p) {
+-          return "<tr><td><code>" + A.esc(p.device) + "</code></td><td>" +
+-            A.esc(p.description || "-") + "</td><td>" + A.esc(p.hwid || "-") +
+-            "</td><td>" + (p.writable
+-              ? (winMode ? '<span class="badge ok">可用</span>' : '<span class="badge ok">可读写</span>')
+-              : (winMode ? '<span class="badge err">不可用</span>'
+-                : '<span class="badge err">无权限</span>')) + "</td></tr>";
+-        }).join("");
+-      } else {
+-        A.loadEmpty(tbody, "未检测到串口设备",
+-          winMode ? "请确认主从臂已接入并安装 USB 转串口驱动" : "请确认机械臂已连接并完成授权",
+-          function () { loadPorts(true); });
+-      }
+-      ids.forEach(function (id) {
+-        var sel = A.el(id), prev = sel.value;
+-        if (r.ports.length) {
+-          A.clearState(sel);
+-          sel.innerHTML = r.ports.map(function (p) {
+-            return '<option value="' + A.esc(p.device) + '">' + A.esc(p.device) +
+-              " — " + A.esc(p.description || "") + "</option>";
+-          }).join("");
+-          if (prev) sel.value = prev;
+-        } else {
+-          A.loadEmpty(sel, "无可用串口",
+-            winMode ? "请确认主从臂已接入并安装 USB 转串口驱动" : "请确认机械臂已接入并完成授权",
+-            function () { loadPorts(true); });
+-        }
+-      });
+-      if (!quiet) A.ok("串口扫描完成，共 " + r.ports.length + " 个设备");
+-    } catch (e) {
+-      A.loadError(tbody, e, function () { loadPorts(true); });
+-      ids.forEach(function (id) {
+-        A.loadError(id, e, function () { loadPorts(true); });
+-      });
+-      A.setAlert("#connAlert", e.message, "err");
+-      A.toast(e.message, "err");
+-    }
++    var data=await A.api.get('/api/ports');
++    var selected=ids.map(function(id){return value(id);});
++    ports=(data.ports||[]).filter(function(p){return /tty(USB|ACM)|\/dev\/serial\/|^COM/i.test(p.device)||(p.description&&p.description!=='n/a')||selected.indexOf(p.device)>=0;});
++    ids.forEach(function(id){fillPort(id);});renderPorts();
++    if(!quiet)A.toast('发现 '+ports.length+' 个外接串口设备','ok');
+   }
+-
+-  async function loadConfig() {
+-    var f = A.el("armForm");
+-    A.showLoading(f, {
+-      title: "正在读取设备参数…", detail: "正在读取 config.json 与真实连接状态", attach: true
+-    });
+-    A.el("connState").textContent = "读取中…";
+-    try {
+-      var c = await A.api.get("/api/config");
+-      f.elements.follower_id.value = c.follower.id || "";
+-      f.elements.can_adapter.value = c.follower.can_adapter || "";
+-      if (f.elements.gripper_torque_ratio) {
+-        f.elements.gripper_torque_ratio.value =
+-          c.follower.gripper_torque_ratio !== undefined ? c.follower.gripper_torque_ratio : 0.12;
+-      }
+-      f.elements.leader_id.value = c.leader.id || "";
+-      A.el("leaderPort").value = c.leader.port || "";
+-      A.el("followerPort").value = c.follower.port || "";
+-      A.clearState(f);
+-      var s = await A.api.get("/api/env/status");
+-      A.el("connState").textContent = s.connected
+-        ? ("已连接 " + s.leader_port + " / " + s.follower_port) : "未连接";
+-    } catch (e) {
+-      A.loadError(f, e, loadConfig, { attach: true });
+-      A.el("connState").textContent = "状态读取失败";
+-      A.setAlert("#connAlert", e.message, "err");
+-    }
+-  }
+-
+-  A.click("btnChmod", function () {
+-    if (winMode) { loadPerm(); loadPorts(); return; }
+-    A.action(async function () {
+-      A.clearAlert("#connAlert");
+-      var r = await A.api.post("/api/system/chmod", {
+-        password: A.el("sudoPwd").value, usb: false
+-      }, 35000);
+-      A.el("sudoPwd").value = "";
+-      A.ok("串口授权成功：" + r.devices.join(", "), "#connAlert");
+-      await loadPerm(true); await loadPorts(true);
+-    }, "#connAlert");
+-  });
+-  A.click("btnChmodUsb", function () {
+-    if (winMode) { A.toast("Windows 无需 USB 设备节点授权，请检查相机隐私设置与驱动", "warn"); return; }
+-    A.action(async function () {
+-      A.clearAlert("#connAlert");
+-      var r = await A.api.post("/api/system/chmod", {
+-        password: A.el("sudoPwd").value, usb: true
+-      }, 35000);
+-      A.el("sudoPwd").value = "";
+-      A.ok("USB 设备授权成功：" + r.devices.length + " 个节点", "#connAlert");
+-    }, "#connAlert");
+-  });
+-  A.click("btnCheckPerm", function () { loadPerm(); });
+-  A.click("btnScanPorts", function () { loadPorts(); });
+-  A.click("btnConnect", function () {
+-    A.action(async function () {
+-      A.clearAlert("#connAlert");
+-      var r = await A.api.post("/api/connect", {
+-        leader_port: A.el("leaderPort").value,
+-        follower_port: A.el("followerPort").value
+-      });
+-      A.el("connState").textContent = "已连接 " + r.leader_port + " / " + r.follower_port;
+-      A.ok("连接成功：主臂 " + r.leader_port + "，从臂 " + r.follower_port, "#connAlert");
+-      A.refreshStatus();
+-    }, "#connAlert");
+-  });
+-  A.click("btnDisconnect", function () {
+-    A.action(async function () {
+-      await A.api.post("/api/disconnect", {});
+-      A.el("connState").textContent = "未连接";
+-      A.setAlert("#connAlert", "已断开连接", "warn");
+-      A.refreshStatus();
+-    }, "#connAlert");
+-  });
+-
+-  ["btnCalLeader:/api/calibrate/leader", "btnCalFollower:/api/calibrate/follower",
+-   "btnCheckEnv:/api/system/check-env"].forEach(function (pair) {
+-    var parts = pair.split(":");
+-    A.click(parts[0], function () {
+-      A.action(async function () {
+-        A.clearAlert("#connAlert");
+-        await A.api.post(parts[1], {});
+-        A.ok("命令已下发，真实输出已在本卡片实时显示", "#connAlert");
+-        A.refreshStatus();
+-      }, "#connAlert");
+-    });
+-  });
+-
+-  ["btnClearRobots:robots", "btnClearTeleop:teleoperators"].forEach(function (pair) {
+-    var parts = pair.split(":");
+-    A.click(parts[0], function () {
+-      A.action(async function () {
+-        A.clearAlert("#connAlert");
+-        if (!(await A.confirm("确认清理「" + parts[1] + "」校准缓存？清理后需重新校准。", { title: "清理校准缓存" }))) return;
+-        var r = await A.api.post("/api/system/clear-calibration", { target: parts[1] });
+-        A.ok("已清理 " + r.removed.length + " 个目录", "#connAlert");
+-      }, "#connAlert");
+-    });
+-  });
+-
+-  A.el("armForm").addEventListener("submit", function (e) {
+-    e.preventDefault();
+-    A.action(async function () {
+-      var d = A.formData(this);
+-      await A.saveConfig({
+-        follower: { id: d.follower_id, can_adapter: d.can_adapter,
+-                    gripper_torque_ratio: Number(d.gripper_torque_ratio || 0.12) },
+-        leader: { id: d.leader_id }
+-      });
+-      A.ok("设备参数已保存", "#connAlert");
+-    }.bind(this), "#connAlert");
+-  });
+-
+-  var timer = null;
+-  A.onLog(function (ev) {
+-    if (ev.type === "state" && ev.running === false) {
+-      clearTimeout(timer);
+-      timer = setTimeout(function () { loadPerm(true); loadPorts(true); }, 500);
+-    }
+-  });
+-
+-  await loadPerm(true);
+-  await loadPorts(true);
+-  await loadConfig();
++  A.onStatus(function(s){if(!s)return;activeDual=!!(s.dual_arm&&s.dual_arm.enabled);paint();});
++  A.el('robotMode').onchange=function(){paint();if(binding)binding.changed();};
++  A.el('deviceSettings').addEventListener('change',renderPorts);
++  A.click('btnScanPorts',function(){A.action(function(){return loadPorts(false);},'#connAlert');});
++  A.click('btnConnect',function(){A.action(async function(){
++    await binding.flush();var dual=value('robotMode')==='dual',payload={};
++    if(dual){payload.dual=true;ids.slice(2).forEach(function(id){payload[id]=value(id);});}
++    else {payload.leader_port=value('leaderPort');payload.follower_port=value('followerPort');}
++    var keys=dual?ids.slice(2):['leader_port','follower_port'], selected=keys.map(function(k){return payload[k];});
++    if(selected.some(function(v){return !v;})||new Set(selected).size!==selected.length)throw new Error('请为每条主臂和从臂选择不同的串口');
++    await A.api.post('/api/connect',payload);await A.refreshStatus();A.ok(dual?'左右四路串口已连接':'主从臂已连接','#connAlert');
++  },'#connAlert');});
++  A.click('btnDisconnect',function(){A.action(async function(){await A.api.post('/api/disconnect',{});await A.refreshStatus();A.ok('设备已断开','#connAlert');},'#connAlert');});
++  A.qa('[data-calibrate]').forEach(function(b){b.onclick=function(){A.action(async function(){await binding.flush();var parts=b.dataset.calibrate.split(':');
++    if(parts.length===2)await A.api.post('/api/dual/calibrate',{side:parts[0],arm:parts[1]});else await A.api.post('/api/calibrate/'+parts[0],{});
++    A.ok(b.textContent+'已启动，可在任务日志中查看进度','#connAlert');await A.refreshStatus();},'#connAlert');};});
++  A.click('btnProbeTypes',function(){A.action(async function(){var r=await A.api.get('/api/dual/types',45000);
++    if(r.error)throw new Error(r.error);
++    [['robotTypeList',r.dual_robots||[]],['teleopTypeList',r.dual_teleops||[]]].forEach(function(pair){A.el(pair[0]).innerHTML=pair[1].map(function(v){return '<option value="'+A.esc(v)+'"></option>';}).join('');});
++    A.el('typeProbeHint').textContent='已发现 '+(r.dual_robots||[]).length+' 个双臂机器人类型、'+(r.dual_teleops||[]).length+' 个双臂主臂类型';
++  },'#connAlert');});
++  A.click('btnChmod',function(){A.action(async function(){if(winMode)return loadPorts(false);var pwd=A.el('sudoPwd');try{await A.api.post('/api/system/chmod',{password:pwd.value,usb:false},35000);await loadPerm(true);await loadPorts(true);A.ok('串口授权完成','#connAlert');}finally{pwd.value='';}},'#connAlert');});
++  A.click('btnChmodUsb',function(){A.action(async function(){var pwd=A.el('sudoPwd');try{await A.api.post('/api/system/chmod',{password:pwd.value,usb:true},35000);A.ok('USB 设备授权完成','#connAlert');}finally{pwd.value='';}},'#connAlert');});
++  A.click('btnCheckPerm',function(){A.action(function(){return loadPerm(false);},'#connAlert');});
++  A.click('btnCheckEnv',function(){A.action(function(){return A.api.post('/api/system/check-env',{});},'#connAlert');});
++  [['btnClearRobots','robots'],['btnClearTeleop','teleoperators']].forEach(function(pair){A.click(pair[0],function(){A.action(async function(){if(!await A.confirm('确认清理校准缓存？清理后需要重新校准。',{title:'清理校准缓存'}))return;await A.api.post('/api/system/clear-calibration',{target:pair[1]});A.ok('校准缓存已清理','#connAlert');},'#connAlert');});});
++  try {
++    cfg=await A.api.get('/api/config');activeDual=!!(cfg.dual_arm&&cfg.dual_arm.enabled);
++    applyDevices(cfg);await loadPorts(true);ready=true;A.el('robotMode').disabled=false;paint();
++    binding=A.autosave.bind({id:'devices',root:'#deviceSettings',read:readDevices,apply:applyDevices,
++      validate:function(){A.qa('#deviceSettings input[type=number]').forEach(function(n){if(!n.checkValidity()||n.value==='')throw new Error('夹爪力矩上限须为 0.01～1');});},
++      write:async function(delta,full){
++        if((A.status()||{}).running)throw new Error('任务运行期间不能更改设备配置，请先停止任务');
++        var patch=A.autosave.merge({},delta), enabled=full.dual_arm.enabled;
++        if(patch.dual_arm){delete patch.dual_arm.enabled;if(!Object.keys(patch.dual_arm).length)delete patch.dual_arm;}
++        if(Object.keys(patch).length)await A.saveConfig(patch);
++        if(enabled!==activeDual){await A.api.post('/api/dual/mode',{enabled:enabled});activeDual=enabled;await A.refreshStatus();}
++        paint();renderPorts();
++      }});
++    A.autosave.onConfig(function(c){cfg=c;activeDual=!!(c.dual_arm&&c.dual_arm.enabled);paint();});
++    loadPerm(true);
++  } catch(e){A.setAlert('#connAlert','设备信息加载失败：'+e.message,'err');}
++  setInterval(function(){if(ready&&!document.hidden&&(!document.activeElement||document.activeElement.tagName!=='SELECT'))loadPorts(true).catch(function(e){A.el('portCount').textContent='· 扫描失败：'+e.message;});},3000);
+ })();
+--- a/frontend/static/js/setup.js
++++ b/frontend/static/js/setup.js
+@@ -120,7 +120,7 @@
+   A.el("setupForm").addEventListener("submit", function (e) {
+     e.preventDefault();
+     A.action(async function () {
+-      await A.saveConfig({ setup: A.formData(A.el("setupForm")) });
++      await A.autosave.flush();
+       A.ok("安装源已保存", "#setupAlert");
+     }, "#setupAlert");
+   });
+@@ -156,6 +156,8 @@
+     }, "#setupAlert");
+   });
+ 
+-  loadConfig();
++  await loadConfig();
++  A.autosave.form('setupForm','setup');
+   await loadCommands();
++  A.autosave.preferences(['setupEnvName', 'setupEnvPy']);
+ })();
+--- a/frontend/static/js/wizard.js
++++ b/frontend/static/js/wizard.js
+@@ -76,7 +76,7 @@
+       var wizBanner = A.el("dualWizBanner");
+       if (wizBanner) wizBanner.hidden = !state.dualMode;
+       var connBtn = A.el("btnConnect");
+-      if (connBtn) connBtn.textContent = state.dualMode ? "前往双臂协作页连接" : "连接";
++      if (connBtn) connBtn.textContent = state.dualMode ? "前往设备页连接四路串口" : "连接";
+       state.activeEnv = s.active || "";
+       var sel = A.el("envSelect");
+       if (s.envs.length) {
+@@ -247,7 +247,7 @@
+   A.click("btnCheckPerm", function () { loadPerm(); });
+   A.click("btnScanPorts", function () { loadPorts(); });
+   A.click("btnConnect", function () {
+-    if (state.dualMode) { location.href = "/p/dual"; return; }
++    if (state.dualMode) { location.href = "/p/connect"; return; }
+     A.action(async function () {
+       A.clearAlert("#connAlert");
+       var r = await A.api.post("/api/connect", {
+--- a/frontend/static/js/common.js
++++ b/frontend/static/js/common.js
+@@ -7,8 +7,7 @@
+ 
+   var NAV = [
+     { id: "home",    label: "总览",       href: "/p/home",    ico: "home" },
+-    { id: "connect", label: "串口与校准", href: "/p/connect", ico: "plug" },
+-    { id: "dual",    label: "双臂协作",   href: "/p/dual",    ico: "dual" },
++    { id: "connect", label: "设备连接与校准", href: "/p/connect", ico: "plug" },
+     { id: "camera",  label: "摄像头",     href: "/p/camera",  ico: "camera" },
+     { id: "teleop",  label: "遥操作",     href: "/p/teleop",  ico: "gamepad" },
+     { id: "eval",    label: "策略评估",   href: "/p/eval",    ico: "chart" },
+@@ -193,6 +192,7 @@
+ 
+   /* ---------------- 统一 API（含超时与错误规范化） ---------------- */
+   async function request(method, url, body, timeoutMs) {
++    if(method==='POST' && /^\/api\/(?:teleop\/start|record\/start|train\/(?:start|resume)|eval$|connect$|calibrate\/|dual\/calibrate|robot-client$)/.test(url) && window.APP && window.APP.autosave) await window.APP.autosave.flush();
+     var ctrl = new AbortController();
+     var timer = setTimeout(function () { ctrl.abort(); }, timeoutMs || 20000);
+     apiPending++;
+@@ -908,7 +908,18 @@
+     node.className = "alert";
+     node.textContent = "";
+   }
++  var clickedAction = null;
++  document.addEventListener('click', function(e){
++    var b=e.target.closest&&e.target.closest('button');
++    if(!b)return;
++    if(b.dataset.actionBusy){e.preventDefault();e.stopImmediatePropagation();return;}
++    clickedAction=b;setTimeout(function(){if(clickedAction===b)clickedAction=null;},0);
++  },true);
+   async function action(fn, alertTarget) {
++    var trigger=clickedAction, elapsedTimer=null, actionStarted=Date.now();
++    if(trigger){trigger.dataset.actionBusy='true';trigger.setAttribute('aria-busy','true');trigger.classList.add('action-pending');
++      elapsedTimer=setInterval(function(){trigger.dataset.waiting=Math.floor((Date.now()-actionStarted)/1000)+'s';},1000);}
++
+     clearAlert(alertTarget);
+     fbResultMsg = "";
+     try {
+@@ -922,6 +933,9 @@
+       fbResultMsg = msg;
+       fbFinish("err", msg);
+       return null;
++    } finally {
++      clearInterval(elapsedTimer);
++      if(trigger){delete trigger.dataset.actionBusy;delete trigger.dataset.waiting;trigger.removeAttribute('aria-busy');trigger.classList.remove('action-pending');}
+     }
+   }
+   function ok(msg, alertTarget) {
+@@ -1248,25 +1262,16 @@
+     }
+     if (s && s.dual_arm && typeof s.dual_arm.enabled === "boolean") {
+       dualMode = s.dual_arm.enabled;
+-      var b = el("dualBanner");
+-      if (b) {
+-        b.hidden = !dualMode;
+-        var txt = el("dualBannerText"), st = el("dualBannerState");
+-        if (txt) txt.textContent = s.dual_arm.connected
+-          ? "左右从臂与左右主臂四路串口已连接；采集、训练、评估都使用双臂复合配置，两臂在同一控制循环里同步。"
+-          : "已开启双臂模式，但四路串口尚未连接；请到「双臂协作」页完成连接后再采集或评估。";
+-        if (st) {
+-          st.textContent = s.dual_arm.connected ? "双臂已连接" : "待连接";
+-          st.className = "badge " + (s.dual_arm.connected ? "ok" : "warn");
+-        }
+-      }
++      paintRobotContext(s);
+       var rt = el("railSerialTitle");
+       if (rt && dualMode) rt.textContent = "串口（双臂四路）";
+     }
+     setJobProgress(fromStatus(s), null, { finish: !!(s && s.running === false) });
+     statusCallbacks.forEach(function (cb) { try { cb(s); } catch (e) {} });
+   }
+-  async function refreshStatus() {
++  var statusFlight = null;
++  function refreshStatus(){if(statusFlight)return statusFlight;statusFlight=readStatus().finally(function(){statusFlight=null;});return statusFlight;}
++  async function readStatus() {
+     try {
+       var s = await API.get("/api/status", 8000);
+       statusFailed = false;
+@@ -1319,7 +1324,7 @@
+     document.dispatchEvent(new CustomEvent("arm:log", { detail: ev }));
+     if (ev.type === "state") applyStateEvent(ev);
+     fbOnEvent(ev);
+-    if (ev.type === "state" && ev.running === false) refreshStatus();
++    if (ev.type === "state" && (!ev.ts || Number(ev.ts)>=BOOT_TS) && (ev.running!==undefined || ev.connected!==undefined || ev.dual_connected!==undefined)) refreshStatus();
+   }
+   function stopLogPolling() {
+     if (logPollTimer) { clearInterval(logPollTimer); logPollTimer = null; }
+@@ -2064,7 +2069,7 @@
+       return;
+     }
+     var groups = [
+-      ["工作台", ["home", "competition", "dual"]],
++      ["工作台", ["home", "competition"]],
+       ["设备", ["connect", "camera"]],
+       ["数据与训练", ["dataset", "viewer", "yolo", "train"]],
+       ["运行", ["teleop", "eval"]],
+@@ -2101,10 +2106,7 @@
+               <button class="btn danger" id="railStop" data-app-nofb>停止全部</button>
+             </div>
+           </header>
+-          <div class="content"><div id="dualBanner" class="dual-banner" hidden>
+-            <span class="badge warn" id="dualBannerState">待连接</span>
+-            <div class="dual-banner-txt"><strong>双臂模式</strong><span id="dualBannerText"></span></div>
+-            <a class="btn subtle sm" href="/p/dual">管理连接</a></div></div>
++          <div class="content">${['teleop','dataset','train','eval'].indexOf(opts.active)>=0?'<section class="robot-context" id="robotContext"><span class="badge" data-context-mode>读取模式中…</span><span data-context-detail>正在获取设备状态</span><a href="/p/connect" class="btn subtle sm">设备连接与校准</a></section>':''}</div>
+         </div>
+         <button class="shell-backdrop" id="railBackdrop" aria-label="关闭任务日志" hidden data-app-nofb></button>
+         <aside class="rail console-drawer" id="rail" role="dialog" aria-modal="true" aria-label="任务日志" hidden>
+@@ -2224,6 +2226,23 @@
+     if (ts) ts.onchange = function () { setTheme(this.value); toast("主题已切换", "ok"); };
+   }
+ 
++  function paintRobotContext(s) {
++    var box=el('robotContext'); if(!box||!s)return;
++    var page=document.body.dataset.page, dual=!!(s.dual_arm&&s.dual_arm.enabled), connected=dual?s.dual_connected:s.connected;
++    box.querySelector('[data-context-mode]').textContent=dual?'双臂 · 左右协同':'单臂 · 主从控制';
++    box.querySelector('[data-context-detail]').textContent=page==='train'
++      ? '训练使用所选数据集的动作与状态维度，无需连接机械臂。'
++      : connected?'设备已连接，可在本页开始'+({teleop:'遥操作',dataset:'采集',eval:'评估'}[page]||'操作')+'。'
++        :'设备尚未连接，请在设备连接与校准页完成'+(dual?'左右四路串口':'主从臂串口')+'连接。';
++    box.querySelector('[data-context-mode]').className='badge '+(page==='train'||connected?'ok':'warn');
++  }
++  async function commandPreview(kind, target) {
++    var node=typeof target==='string'?q(target):target;if(!node)return;
++    node.textContent='正在生成已保存配置的命令…';
++    try { var r=await API.get('/api/commands/preview?kind='+encodeURIComponent(kind));node.textContent=r.error||('$ '+r.command); }
++    catch(e){node.textContent='命令预览暂不可用：'+e.message;}
++  }
++
+   async function gate() {
+     try {
+       var s = await API.get("/api/env/status", 8000);
+@@ -2239,21 +2258,23 @@
+ 
+   async function init(opts) {
+     opts = opts || {};
++    document.body.dataset.page = opts.active || "wizard";
+     renderShell(opts);
+     mountRuntime();
++    if(window.APP.autosave) window.APP.autosave.mount();
+     if (!el('toasts')) {
+       var toasts = document.createElement('div'); toasts.id = 'toasts'; document.body.appendChild(toasts);
+     }
+     connectLogs();
+     refreshRuntime().catch(function () {});
+     refreshStatus();
+-    setInterval(refreshStatus, 4000);
++    setInterval(refreshStatus, 2000);
+     if (opts.gate !== false) await gate();
+     return appStatus;
+   }
+ 
+   window.APP = {
+-    init: init, api: API, esc: esc, el: el, q: q, qa: qa, icon: icon,
++    commandPreview: commandPreview, init: init, api: API, esc: esc, el: el, q: q, qa: qa, icon: icon,
+     toast: toast, notify: notify, confirm: confirmModal, prompt: promptModal,
+     blocking: blockingModal,
+     store: store, load: load,
+--- a/frontend/static/js/teleop.js
++++ b/frontend/static/js/teleop.js
+@@ -2,18 +2,8 @@
+ (async function () {
+   "use strict";
+   var A = window.APP;
+-  await A.init({ active: "teleop", title: "遥操作", subtitle: "遥操作启停、策略评估与异步推理" });
++  await A.init({ active: "teleop", title: "遥操作", subtitle: "遥操作启停与异步推理" });
+   A.attachLogPanel(A.el("logPanel"));
+-
+-  function preview(c) {
+-    var f = c.follower, l = c.leader;
+-    return "lerobot-teleoperate" +
+-      " --robot.type=" + f.type + " --robot.port=" + f.port +
+-      " --robot.id=" + f.id + " --robot.can_adapter=" + f.can_adapter +
+-      " --teleop.type=" + l.type + " --teleop.port=" + l.port +
+-      " --teleop.id=" + l.id + " --robot.cameras={...} " +
+-      "--display_data=" + (c.teleop.display_data ? "true" : "false");
+-  }
+ 
+   function ckptLabel(p) {
+     return String(p || "").replace(/^outputs\/train\//, "").replace(/\/pretrained_model$/, "");
+@@ -59,7 +49,7 @@
+       A.fillForm(A.el("asyncForm"), c.async_inference);
+       await loadCkptOptions(A.q('#asyncForm [name="model_path"]'), c.async_inference && c.async_inference.model_path);
+       A.el("displayData").checked = Boolean(c.teleop.display_data);
+-      A.el("cmdPreview").textContent = preview(c);
++      await A.commandPreview("teleoperate", "#cmdPreview");
+       if (f) A.clearState(f);
+     } catch (e) {
+       A.loadError(f, e, loadConfig, { attach: true });
+@@ -88,17 +78,10 @@
+       A.refreshStatus();
+     }, "#telAlert");
+   });
+-  A.change("displayData", function () {
+-    A.action(async function () {
+-      await A.saveConfig({ teleop: { display_data: A.el("displayData").checked } });
+-      await loadConfig();
+-    }, "#telAlert");
+-  });
+-
+   A.el("asyncForm").addEventListener("submit", function (e) {
+     e.preventDefault();
+     A.action(async function () {
+-      await A.saveConfig({ async_inference: A.formData(A.el("asyncForm")) });
++      await A.autosave.flush();
+       A.ok("异步推理参数已保存", "#telAlert");
+     }, "#telAlert");
+   });
+@@ -111,6 +94,7 @@
+             !A.q('#asyncForm [name="model_path"]').value) {
+           throw new Error("请先选择模型检查点：还没有可用的检查点，请先训练一次");
+         }
++        await A.autosave.flush();
+         await A.api.post(parts[1], {});
+         A.ok("命令已下发，输出已在本卡片实时显示", "#telAlert");
+         A.refreshStatus();
+@@ -118,5 +102,8 @@
+     });
+   });
+ 
+-  loadConfig();
++  await loadConfig();
++  A.autosave.form('asyncForm','async_inference');
++  A.autosave.bind({id:'teleop-display',root:'#displayData',read:function(){return {teleop:{display_data:A.el('displayData').checked}};},apply:function(c){A.el('displayData').checked=!!(c.teleop||{}).display_data;}});
++  A.autosave.onConfig(function(){A.commandPreview('teleoperate','#cmdPreview');});
+ })();
+--- a/frontend/static/js/grasp.js
++++ b/frontend/static/js/grasp.js
+@@ -222,4 +222,5 @@
+   await loadCal();
+   await loadModels();
+   snap();
++  A.autosave.preferences(['camIndex', 'valModel', 'valConf', 'aiClasses', 'tgtU', 'tgtV', 'approach']);
+ })();
+--- /dev/null
++++ b/tests/browser/annotation-queue.cjs
+@@ -0,0 +1,4 @@
++const {chromium}=require('playwright');const fs=require('node:fs'),assert=require('node:assert/strict');
++(async()=>{const b=await chromium.launch({executablePath:'/opt/google/chrome/chrome',headless:true,args:['--no-sandbox']});const p=await b.newPage();const saved={},writes=[];let slow=true;const dataset=name=>({name,images_train:1,images_val:1,labels_train:0,labels_val:0,classes:['box']});
++await p.route('**/api/yolo/datasets**',async route=>{const r=route.request(),u=new URL(r.url()),path=u.pathname;let body;if(path==='/api/yolo/datasets')body={datasets:[dataset('qa_a'),dataset('qa_b')]};else if(path.endsWith('/images'))body={images:[{file:'one.jpg',labeled:false}]};else if(path.endsWith('/image'))return route.fulfill({contentType:'image/svg+xml',body:fs.readFileSync(require('node:path').resolve(__dirname,'../../frontend/static/img/camera-off.svg'))});else if(path.endsWith('/label')){const key=path+'?'+(r.method()==='PUT'?r.postDataJSON().split:u.searchParams.get('split'));if(r.method()==='PUT'){if(slow)await new Promise(r=>setTimeout(r,1000));saved[key]=r.postDataJSON().text;writes.push({key,text:saved[key]});body={ok:true};}else body={text:saved[key]||''};}else body={};return route.fulfill({contentType:'application/json',body:JSON.stringify(body)});});
++await p.goto((process.env.REBOT_TEST_URL||'http://127.0.0.1:8012')+'/p/yolo');await p.locator('[data-img="one.jpg"]').click();await p.waitForFunction(()=>document.querySelector('#annotHint').hidden);await p.locator('#labelText').fill('0 .5 .5 .2 .2');await p.waitForTimeout(750);await p.locator('#labelText').fill('0 .4 .4 .3 .3');await p.locator('#dsSelect').selectOption('qa_b');await p.waitForTimeout(2800);assert.equal(saved['/api/yolo/datasets/qa_a/label?train'],'0 .4 .4 .3 .3');assert.ok(!saved['/api/yolo/datasets/qa_b/label?train']);console.log('PASS annotation queue preserves latest text and flushes old dataset before switching');await b.close();})().catch(e=>{console.error(e);process.exit(1);});
+--- /dev/null
++++ b/tests/browser/autosave.cjs
+@@ -0,0 +1,27 @@
++const {chromium}=require('playwright');const assert=require('node:assert/strict');
++(async()=>{
++ const browser=await chromium.launch({executablePath:'/opt/google/chrome/chrome',headless:true,args:['--no-sandbox']});
++ const ctx=await browser.newContext({viewport:{width:1440,height:1000}});const errors=[],calls=[];let delayed=false,failSave=false,delayAction=false;
++ await ctx.route('**/api/**',async route=>{const r=route.request(),path=new URL(r.url()).pathname;
++   if(r.method()==='POST'&&path==='/api/config'){if(failSave)return route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({ok:false,error:'QA simulated save outage'})});if(delayed)await new Promise(r=>setTimeout(r,1400));return route.continue();}
++   if(['POST','PUT','DELETE'].includes(r.method())&&path!=='/api/dual/mode'){calls.push({path,data:r.postDataJSON()});if(delayAction)await new Promise(r=>setTimeout(r,1800));return route.fulfill({status:200,contentType:'application/json',body:'{"ok":true}'});}
++   return route.continue();
++ });
++ const page=await ctx.newPage(),other=await ctx.newPage();[page,other].forEach(p=>p.on('pageerror',e=>errors.push(e.message)));
++ const base=process.env.REBOT_TEST_URL||'http://127.0.0.1:8012';const config=async()=> (await(await page.request.get(base+'/api/config')).json());
++ const wait=async fn=>{const deadline=Date.now()+20000;while(Date.now()<deadline){if(await fn())return;await page.waitForTimeout(180);}throw Error('Condition did not converge');};
++ await page.goto(base+'/p/dataset');await other.goto(base+'/p/dataset');await page.waitForFunction(()=>APP.autosave.state().some(s=>s.id.startsWith('dataset:')));await other.waitForFunction(()=>APP.autosave.state().some(s=>s.id.startsWith('dataset:')));
++ delayed=true;await page.locator('#recordForm [name=single_task]').fill('QA first');await page.waitForTimeout(750);await page.locator('#recordForm [name=single_task]').fill('QA latest task');await other.locator('#recordForm [name=num_episodes]').fill('4');
++ await wait(async()=>{const c=await config();return c.dataset.single_task==='QA latest task'&&c.dataset.num_episodes===4;});delayed=false;await wait(async()=>await other.locator('#recordForm [name=single_task]').inputValue()==='QA latest task');
++ console.log('PASS rapid edits during save, disjoint fields from two pages, live cross-page refresh');
++ failSave=true;await page.locator('#recordForm [name=single_task]').fill('QA retained after failure');await page.waitForFunction(()=>document.querySelector('#autosaveState').classList.contains('err'));assert.ok(await page.locator('#autosaveError').isVisible());
++ page.once('dialog',d=>d.accept());await page.reload();failSave=false;await wait(async()=>(await config()).dataset.single_task==='QA retained after failure');console.log('PASS visible save failure, retained draft, reload and recovery');
++ delayAction=true;await page.locator('#recordForm [name=single_task]').fill('QA save before start');await page.locator('#btnRecord').click();await page.waitForFunction(()=>document.querySelector('#btnRecord').getAttribute('aria-busy')==='true');await wait(async()=>calls.some(c=>c.path==='/api/record/start'));assert.equal((await config()).dataset.single_task,'QA save before start');await page.waitForTimeout(2000);delayAction=false;console.log('PASS task start flushes config; button shows pending feedback; hardware request intercepted');
++ await page.goto(base+'/p/connect');await page.waitForFunction(()=>APP.autosave.state().some(s=>s.id==='devices'));assert.equal(await page.locator('.nav a[href="/p/dual"]').count(),0);assert.equal(await page.locator('#left_follower').isVisible(),true);
++ await page.locator('#robotMode').selectOption('single');await wait(async()=>!(await config()).dual_arm.enabled);await wait(async()=>await page.locator('#leaderPort').isVisible());
++ await page.locator('#robotMode').selectOption('dual');await wait(async()=>(await config()).dual_arm.enabled);await wait(async()=>await page.locator('#left_follower').isVisible());
++ assert.equal(await page.locator('[data-mode="dual"] [data-calibrate]').count(),4);console.log('PASS device page switches single/dual with autosave and exposes all four calibrations');
++ await page.goto(base+'/p/dual');assert.ok(page.url().endsWith('/p/connect'));
++ await page.goto(base+'/p/train');await page.waitForFunction(()=>APP.autosave.state().some(s=>s.id==='training'));await page.locator('#l_steps').fill('4567');await wait(async()=>(await config()).train.steps===4567);console.log('PASS training autosave and legacy page redirect');
++ assert.deepEqual(errors,[]);await browser.close();
++})().catch(e=>{console.error(e);process.exit(1);});
+--- /dev/null
++++ b/tests/browser/functional-pages.cjs
+@@ -0,0 +1,7 @@
++const {chromium}=require('playwright');const assert=require('node:assert/strict');const fs=require('node:fs');
++(async()=>{const b=await chromium.launch({executablePath:'/opt/google/chrome/chrome',headless:true,args:['--no-sandbox']});const ctx=await b.newContext({viewport:{width:1440,height:1000}});const errors=[],mutations=[];await ctx.route('**/api/**',async route=>{const r=route.request(),path=new URL(r.url()).pathname;if(path.startsWith('/api/camera/stream')||path.startsWith('/api/camera/snapshot'))return route.fulfill({contentType:'image/svg+xml',body:fs.readFileSync(require('node:path').resolve(__dirname,'../../frontend/static/img/camera-off.svg'))});if(['POST','PUT','DELETE'].includes(r.method())&&!['/api/config','/api/dual/mode'].includes(path)){mutations.push(path);return route.fulfill({contentType:'application/json',body:'{"ok":true}'});}return route.continue();});const p=await ctx.newPage();p.on('pageerror',e=>errors.push(e.message));const base=process.env.REBOT_TEST_URL||'http://127.0.0.1:8012';const conf=async()=>(await(await p.request.get(base+'/api/config')).json());async function wait(fn){for(let i=0;i<80;i++){if(await fn())return;await p.waitForTimeout(150);}throw Error('Save did not converge');}
++await p.goto(base+'/p/eval');await p.waitForFunction(()=>APP.autosave.state().some(x=>x.id==='eval:evalForm'));await p.locator('#evalForm [name=single_task]').fill('QA eval autosave');await wait(async()=>(await conf()).eval.single_task==='QA eval autosave');
++await p.goto(base+'/p/teleop');await p.waitForFunction(()=>APP.autosave.state().some(x=>x.id.startsWith('async_inference')));await p.locator('#asyncForm [name=actions_per_chunk]').fill('17');await wait(async()=>(await conf()).async_inference.actions_per_chunk===17);
++await p.goto(base+'/p/setup');await p.waitForFunction(()=>APP.autosave.state().some(x=>x.id==='setup:setupForm'));await p.locator('#setupForm [name=pip_index]').fill('https://pypi.org/simple');await wait(async()=>(await conf()).setup.pip_index==='https://pypi.org/simple');
++await p.goto(base+'/p/camera');await p.waitForFunction(()=>APP.autosave.state().some(x=>x.id==='cameras'));const original=(await conf()).cameras[0].name;await p.locator('.camera-tile [data-edit]').first().click();await p.locator('#camName').fill('QA auto camera');await wait(async()=>(await conf()).cameras[0].name==='QA auto camera');await p.locator('#camName').fill(original);await wait(async()=>(await conf()).cameras[0].name===original);await p.locator('#btnCancelCamera').click();console.log('PASS eval, async inference, setup and camera edits autosave without a save button');
++for(const viewport of [{width:1440,height:1000},{width:390,height:844}]){await p.setViewportSize(viewport);for(const name of ['home','connect','teleop','dataset','train','eval','setup','yolo','viewer','grasp','arm','logs','camera']){await p.goto(base+'/p/'+name);await p.waitForTimeout(750);assert.ok(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),name+' overflows '+viewport.width);if(['connect','teleop','dataset','train','eval'].includes(name))await p.screenshot({path:'/tmp/rebot-functional-after-'+name+'-'+viewport.width+'.png',fullPage:true});}}assert.deepEqual(errors,[]);assert.deepEqual(mutations,[]);console.log('PASS 13 pages at desktop/mobile sizes, no JavaScript errors, no hardware actions');await b.close();})().catch(e=>{console.error(e);process.exit(1);});
+--- a/frontend/static/js/dual.js
++++ /dev/null
+@@ -1,525 +0,0 @@
+-/* 双臂协作：设备与连接 / 协作编排 / 采集 / 训练 / 评估 / 命令预览
+-   所有数据均来自后端真实接口，页面不生成模拟轨迹或伪造连接状态。 */
+-(async function () {
+-  "use strict";
+-  var A = window.APP;
+-  await A.init({ active: "dual", title: "双臂协作",
+-                 subtitle: "左右双臂连接、同步采集、训练评估与协作编排" });
+-  A.attachLogPanel(A.el("logPanel"));
+-
+-  var PORT_KEYS = ["left_follower", "left_leader", "right_follower", "right_leader"];
+-  var cfg = null, plan = null, portList = [], timer = null, phaseIdx = 0, phaseLeft = 0;
+-  var alertSel = "#dualAlert";
+-
+-  function esc(s) { return A.esc(String(s === undefined || s === null ? "" : s)); }
+-  function val(id) { var n = A.el(id); return n ? String(n.value || "").trim() : ""; }
+-  function setv(id, v) { var n = A.el(id); if (n) n.value = (v === undefined || v === null) ? "" : String(v); }
+-
+-  /* ---------------- 配置 ---------------- */
+-  function fillSide(side, d) {
+-    d = d || {};
+-    var cap = side.charAt(0).toUpperCase() + side.slice(1);
+-    setv(side + "_follower", d.follower_port || "");
+-    setv(side + "_leader", d.leader_port || "");
+-    setv(side + "FollowerType", d.follower_type || "");
+-    setv(side + "FollowerId", d.follower_id || "");
+-    setv(side + "LeaderType", d.leader_type || "");
+-    setv(side + "LeaderId", d.leader_id || "");
+-    setv(side + "Can", d.can_adapter || "");
+-    setv(side + "GripForce", d.gripper_torque_ratio !== undefined ? d.gripper_torque_ratio : 0.12);
+-    return cap;
+-  }
+-
+-  function sidePayload(side) {
+-    return {
+-      follower_type: val(side + "FollowerType"),
+-      follower_port: val(side + "_follower"),
+-      follower_id: val(side + "FollowerId"),
+-      can_adapter: val(side + "Can"),
+-      gripper_torque_ratio: (function () {
+-        var v = parseFloat(val(side + "GripForce"));
+-        return isFinite(v) ? Math.max(0.01, Math.min(1, v)) : 0.12;
+-      })(),
+-      leader_type: val(side + "LeaderType"),
+-      leader_port: val(side + "_leader"),
+-      leader_id: val(side + "LeaderId")
+-    };
+-  }
+-
+-  var dualReady = false;
+-  var SAVED_PORT_MAP = {
+-    left_follower: ["left", "follower_port"],
+-    left_leader: ["left", "leader_port"],
+-    right_follower: ["right", "follower_port"],
+-    right_leader: ["right", "leader_port"]
+-  };
+-  function savedPort(key) {
+-    var m = SAVED_PORT_MAP[key];
+-    if (!m || !cfg || !cfg.dual_arm) return "";
+-    var side = cfg.dual_arm[m[0]] || {};
+-    return side[m[1]] || "";
+-  }
+-
+-  function devicePayload() {
+-    return {
+-      robot_type: val("dualRobotType"),
+-      teleop_type: val("dualTeleopType"),
+-      left_prefix: val("leftPrefix") || "left_arm",
+-      right_prefix: val("rightPrefix") || "right_arm",
+-      coordination: val("coordination") || "sync",
+-      left: sidePayload("left"),
+-      right: sidePayload("right")
+-    };
+-  }
+-
+-  async function loadConfig() {
+-    cfg = await A.api.get("/api/config");
+-    var d = cfg.dual_arm || {};
+-    A.el("dualEnabled").checked = Boolean(d.enabled);
+-    setv("dualRobotType", d.robot_type);
+-    setv("dualTeleopType", d.teleop_type);
+-    setv("leftPrefix", d.left_prefix || "left_arm");
+-    setv("rightPrefix", d.right_prefix || "right_arm");
+-    setv("coordination", d.coordination || "sync");
+-    fillSide("left", d.left);
+-    fillSide("right", d.right);
+-    A.fillForm(A.el("dualRecordForm"), cfg.dataset || {});
+-    A.fillForm(A.el("dualTrainForm"), cfg.train || {});
+-    A.fillForm(A.el("dualEvalForm"), cfg.eval || {});
+-    return cfg;
+-  }
+-
+-  async function loadOptions() {
+-    try {
+-      var r = await A.api.get("/api/datasets");
+-      var ds = r.datasets || [];
+-      var sel = A.el("dualTrainDs");
+-      var cur = sel.value || (cfg && cfg.train ? cfg.train.repo_id : "");
+-      sel.innerHTML = ds.length
+-        ? ds.map(function (x) {
+-            return '<option value="' + esc(x.repo_id) + '">' + esc(x.repo_id) +
+-              "（" + esc(x.episodes) + " 集）</option>";
+-          }).join("")
+-        : '<option value="">（暂无数据集，请先采集）</option>';
+-      if (cur) sel.value = cur;
+-    } catch (e) { A.toast(e.message, "warn"); }
+-    try {
+-      var c = await A.api.get("/api/checkpoints");
+-      var list = c.checkpoints || [];
+-      var ck = A.el("dualEvalCkpt");
+-      var want = ck.value || (cfg && cfg.eval ? cfg.eval.policy_path : "");
+-      ck.innerHTML = list.length
+-        ? list.map(function (x) {
+-            return '<option value="' + esc(x.path) + '">' + esc(x.path) + "</option>";
+-          }).join("")
+-        : '<option value="">（暂无检查点，请先训练）</option>';
+-      if (want) ck.value = want;
+-    } catch (e) { A.toast(e.message, "warn"); }
+-  }
+-
+-  /* ---------------- 状态 ---------------- */
+-  function renderStatus(s) {
+-    if (!s) return;
+-    var d = s.dual_arm || {};
+-    A.el("dualModeState").textContent = d.enabled
+-      ? (d.connected ? "双臂模式 · 已连接" : "双臂模式 · 待连接四路串口")
+-      : "单臂模式（原流程）";
+-    var p = d.active_ports || {};
+-    var rows = [
+-      ["运行模式", d.enabled ? "双臂（复合机器人）" : "单臂"],
+-      ["连接状态", s.dual_connected ? "四路串口已连接" :
+-        (s.connected ? "单臂已连接" : "未连接")],
+-      ["复合 robot_type", d.robot_type || "未设置"],
+-      ["复合 teleop_type", d.teleop_type || "未设置"],
+-      ["协作模式", d.coordination || "sync"],
+-      ["四路串口", PORT_KEYS.map(function (k) {
+-        return k + "=<code>" + esc(p[k] || "未连接") + "</code>";
+-      }).join("　")]
+-    ];
+-    A.el("dualStatusList").innerHTML = rows.map(function (r) {
+-      return "<div><strong>" + esc(r[0]) + "：</strong>" + r[1] + "</div>";
+-    }).join("");
+-    A.el("connHint").textContent = s.dual_connected
+-      ? "四路串口已逐个真实打开并验证" : "四路串口必须互不相同，连接时逐个真实打开验证";
+-  }
+-
+-  /* ---------------- 串口 ---------------- */
+-  async function loadPorts(quiet) {
+-    var tbody = A.q("#dualPortTable tbody");
+-    A.showLoading(tbody, { title: "正在扫描串口…", detail: "读取 /api/ports 的真实设备列表", rows: 3 });
+-    try {
+-      var r = await A.api.get("/api/ports");
+-      portList = r.ports || [];
+-      var opts = '<option value="">（选择串口）</option>' + portList.map(function (p) {
+-        return '<option value="' + esc(p.device) + '">' + esc(p.device) + " · " +
+-          esc(p.description || "") + "</option>";
+-      }).join("");
+-      PORT_KEYS.forEach(function (k) {
+-        var sel = A.el(k);
+-        var cur = sel.value || savedPort(k) || "";
+-        var inList = portList.some(function (p) { return p.device === cur; });
+-        var extra = (cur && !inList)
+-          ? '<option value="' + esc(cur) + '">' + esc(cur) + "（已保存，当前不可用）</option>"
+-          : "";
+-        sel.innerHTML = opts + extra;
+-        sel.value = cur || "";
+-      });
+-      if (!portList.length) {
+-        A.loadEmpty(tbody, "未检测到串口设备",
+-          "请确认左右主从臂已通过 USB 接入，并检查 USB 转串口驱动",
+-          function () { loadPorts(true); });
+-      } else {
+-        tbody.innerHTML = portList.map(function (p) {
+-          var used = PORT_KEYS.filter(function (k) { return A.el(k).value === p.device; });
+-          return "<tr><td><code>" + esc(p.device) + "</code></td><td>" +
+-            esc(p.description || "-") + "</td><td>" + esc(p.hwid || "-") + "</td><td>" +
+-            (p.writable ? '<span class="badge ok">可用</span>'
+-              : '<span class="badge err">不可用</span>') + "</td><td>" +
+-            (used.length ? esc(used.join("、")) : '<span class="muted">未分配</span>') +
+-            "</td></tr>";
+-        }).join("");
+-      }
+-      if (!quiet) A.ok("串口扫描完成，共 " + portList.length + " 个设备", alertSel);
+-    } catch (e) {
+-      A.loadError(tbody, e, function () { loadPorts(true); });
+-      A.toast(e.message, "err");
+-    }
+-  }
+-
+-  /* ---------------- 类型探测 ---------------- */
+-  async function probeTypes() {
+-    A.action(async function () {
+-      var r = await A.api.get("/api/dual/types");
+-      var robots = (r.dual_robots || []).concat((r.robots || []).filter(function (n) {
+-        return (r.dual_robots || []).indexOf(n) < 0;
+-      }));
+-      var teleops = (r.dual_teleops || []).concat((r.teleops || []).filter(function (n) {
+-        return (r.dual_teleops || []).indexOf(n) < 0;
+-      }));
+-      var fill = function (id, list) {
+-        A.el(id).innerHTML = list.map(function (n) {
+-          return '<option value="' + esc(n) + '"></option>';
+-        }).join("");
+-      };
+-      fill("robotTypeList", robots);
+-      fill("teleopTypeList", teleops);
+-      if (!val("dualRobotType") && (r.dual_robots || []).length === 1) {
+-        setv("dualRobotType", r.dual_robots[0]);
+-      }
+-      if (!val("dualTeleopType") && (r.dual_teleops || []).length === 1) {
+-        setv("dualTeleopType", r.dual_teleops[0]);
+-      }
+-      if (r.error) {
+-        A.setAlert(alertSel, r.error + "（探测命令：" + r.command + "）", "warn");
+-      } else {
+-        A.ok("检测完成：LeRobot " + esc(r.lerobot_version || "?") + "，robot 类型 " +
+-          robots.length + " 个（双臂候选 " + (r.dual_robots || []).length +
+-          "），teleop 类型 " + teleops.length + " 个（双臂候选 " +
+-          (r.dual_teleops || []).length + "）。下拉框可手填。", alertSel);
+-      }
+-    }, alertSel);
+-  }
+-
+-  /* ---------------- 协作编排 ---------------- */
+-  async function loadPlan(key, quiet) {
+-    try {
+-      var r = await A.api.get("/api/dual/plan?coordination=" + encodeURIComponent(key || "sync"));
+-      plan = r;
+-      var tpl = A.el("planTemplate");
+-      if (!tpl.options.length) {
+-        tpl.innerHTML = (r.templates || []).map(function (t) {
+-          return '<option value="' + esc(t.key) + '">' + esc(t.label) + "（" +
+-            esc(t.total_seconds) + "s）</option>";
+-        }).join("");
+-      }
+-      tpl.value = r.coordination;
+-      setv("coordination", r.coordination);
+-      A.el("planMeta").textContent = r.label + " · " + r.total_seconds + "s · " +
+-        r.phases.length + " 阶段 · " + r.desc;
+-      A.q("#phaseTable tbody").innerHTML = (r.phases || []).map(function (p, i) {
+-        return "<tr data-phase=\"" + i + "\"><td>" + esc(p.name) + "</td><td>" +
+-          esc(p.seconds) + "</td><td>" + esc(p.left) + "</td><td>" + esc(p.right) +
+-          "</td><td>" + (p.sync ? '<span class="phase-sync">两臂同步到位</span>'
+-            : '<span class="muted">各自动作</span>') + "</td></tr>";
+-      }).join("");
+-      stopTimer();
+-      if (!quiet) A.ok("已载入协作模板：" + r.label, alertSel);
+-    } catch (e) {
+-      A.toast(e.message, "err");
+-      A.setAlert(alertSel, e.message, "err");
+-    }
+-  }
+-
+-  function stopTimer() {
+-    if (timer) { clearInterval(timer); timer = null; }
+-    phaseIdx = 0; phaseLeft = 0;
+-  }
+-
+-  function renderClock(text, activeIdx) {
+-    A.el("phaseClock").textContent = text;
+-    A.qa("#phaseTable tbody tr").forEach(function (tr) {
+-      tr.style.opacity = (activeIdx >= 0 && Number(tr.dataset.phase) === activeIdx) ? "1" : ".62";
+-      tr.style.background = (activeIdx >= 0 && Number(tr.dataset.phase) === activeIdx) ?
+-        "var(--accent-soft)" : "";
+-    });
+-  }
+-
+-  function toggleTimer() {
+-    if (timer) {
+-      stopTimer();
+-      renderClock("计时已停止", -1);
+-      A.el("btnPhaseTimer").textContent = "开始计时";
+-      return;
+-    }
+-    if (!plan || !plan.phases || !plan.phases.length) { A.toast("请先载入协作模板", "warn"); return; }
+-    phaseIdx = 0;
+-    phaseLeft = Number(plan.phases[0].seconds) || 0;
+-    A.el("btnPhaseTimer").textContent = "停止计时";
+-    renderClock("第 1 阶段 · " + plan.phases[0].name + " · 剩余 " + phaseLeft + "s", 0);
+-    timer = setInterval(function () {
+-      if (!plan || !plan.phases.length) { stopTimer(); return; }
+-      phaseLeft -= 1;
+-      if (phaseLeft <= 0) {
+-        phaseIdx += 1;
+-        if (phaseIdx >= plan.phases.length) {
+-          stopTimer();
+-          renderClock("编排计时完成（共 " + plan.total_seconds + "s）", -1);
+-          A.el("btnPhaseTimer").textContent = "开始计时";
+-          A.toast("协作编排计时结束", "ok");
+-          return;
+-        }
+-        phaseLeft = Number(plan.phases[phaseIdx].seconds) || 0;
+-      }
+-      renderClock("第 " + (phaseIdx + 1) + " 阶段 · " + plan.phases[phaseIdx].name +
+-        " · 剩余 " + phaseLeft + "s", phaseIdx);
+-    }, 1000);
+-  }
+-
+-  /* ---------------- 命令预览 ---------------- */
+-  async function preview() {
+-    A.action(async function () {
+-      var kind = val("previewKind") || "record";
+-      var r = await A.api.get("/api/dual/preview?kind=" + encodeURIComponent(kind));
+-      var box = A.el("dualCmdBox");
+-      if (r.error) {
+-        box.textContent = "无法生成命令：" + r.error;
+-        A.setAlert(alertSel, r.error, "warn");
+-      } else {
+-        box.textContent = "$ " + r.command;
+-        A.ok((r.enabled ? "双臂" : "单臂") + "命令预览已生成", alertSel);
+-      }
+-    }, alertSel);
+-  }
+-
+-  /* ---------------- 事件绑定 ---------------- */
+-  A.change("dualEnabled", function () {
+-    A.action(async function () {
+-      var enabled = A.el("dualEnabled").checked;
+-      // 先落盘用户已填的设备配置，避免切换模式后重新载入表单把未保存的编辑冲掉
+-      await A.saveConfig({ dual_arm: devicePayload() });
+-      await A.api.post("/api/dual/mode", { enabled: enabled });
+-      A.ok("已切换到" + (enabled ? "双臂" : "单臂") + "模式，连接状态已重置，请重新连接串口", alertSel);
+-      await loadConfig();
+-      A.refreshStatus();
+-      await preview();
+-    }, alertSel);
+-  });
+-  var _dualTimer = null;
+-  function autoSaveDual() {
+-    if (!dualReady) return;
+-    clearTimeout(_dualTimer);
+-    _dualTimer = setTimeout(function () {
+-      try {
+-        var payload = devicePayload();
+-        // 串口下拉为空时保留已保存的端口，避免把配置冲掉
+-        ["left", "right"].forEach(function (side) {
+-          ["follower_port", "leader_port"].forEach(function (key) {
+-            if (!payload[side][key]) {
+-              var saved = savedPort(side + "_" + (key === "follower_port" ? "follower" : "leader"));
+-              if (saved) payload[side][key] = saved;
+-            }
+-          });
+-        });
+-        A.saveConfig({ dual_arm: payload }).catch(function () {});
+-      } catch (e) { /* ignore */ }
+-    }, 800);
+-  }
+-  var dualPage = A.el("page");
+-  if (dualPage) {
+-    dualPage.addEventListener("change", function (e) {
+-      if (!e.target || !/^(INPUT|SELECT)$/.test(e.target.tagName)) return;
+-      if (e.target.id === "dualEnabled") return;
+-      var id = e.target.id || "";
+-      if (!/^(dual|left|right|coordination)/.test(id) &&
+-          !e.target.classList.contains("dual-port")) return;
+-      autoSaveDual();
+-    });
+-  }
+-
+-  A.click("btnRefreshDual", function () {
+-    A.action(async function () {
+-      await loadConfig(); await loadPorts(true); A.refreshStatus();
+-      A.ok("状态已刷新", alertSel);
+-    }, alertSel);
+-  });
+-  A.click("btnScanDualPorts", function () { A.action(function () { return loadPorts(false); }, alertSel); });
+-  A.click("btnProbeTypes", probeTypes);
+-  A.click("btnSaveDualCfg", function () {
+-    A.action(async function () {
+-      cfg = await A.saveConfig({ dual_arm: devicePayload() });
+-      A.ok("双臂设备配置已保存", alertSel);
+-      await preview();
+-    }, alertSel);
+-  });
+-  A.click("btnConnectDual", function () {
+-    A.action(async function () {
+-      var p = { dual: true };
+-      PORT_KEYS.forEach(function (k) { p[k] = val(k); });
+-      await A.api.post("/api/connect", p);
+-      cfg = await A.saveConfig({ dual_arm: devicePayload() });
+-      A.ok("四路串口已逐个真实打开并验证，双臂连接成功", alertSel);
+-      A.refreshStatus();
+-      await loadPorts(true);
+-      await preview();
+-    }, alertSel);
+-  });
+-  A.click("btnDisconnectDual", function () {
+-    A.action(async function () {
+-      await A.api.post("/api/disconnect", {});
+-      A.ok("已断开双臂连接", alertSel);
+-      A.refreshStatus();
+-    }, alertSel);
+-  });
+-
+-  A.qa("[data-cal]").forEach(function (btn) {
+-    btn.addEventListener("click", function () {
+-      A.action(async function () {
+-        var parts = btn.dataset.cal.split(":");
+-        await A.api.post("/api/dual/calibrate", { side: parts[0], arm: parts[1] });
+-        A.ok("已启动校准：" + btn.textContent, alertSel);
+-      }, alertSel);
+-    });
+-  });
+-
+-  A.change("planTemplate", function () { loadPlan(A.el("planTemplate").value, true); });
+-  A.click("btnPhaseTimer", toggleTimer);
+-  A.click("btnSavePlan", function () {
+-    A.action(async function () {
+-      var r = await A.api.post("/api/dual/plan", {
+-        coordination: val("planTemplate") || "sync",
+-        apply_task: A.el("applyTask").checked
+-      });
+-      A.ok("协作编排已保存：" + r.path + "；采集任务描述：" + r.dataset_task, alertSel);
+-      if (A.el("applyTask").checked) {
+-        var f = A.q('#dualRecordForm [name="single_task"]');
+-        if (f) f.value = r.dataset_task;
+-      }
+-      await loadConfig();
+-    }, alertSel);
+-  });
+-
+-  A.click("btnDualTeleop", function () {
+-    A.action(async function () {
+-      await A.api.post("/api/teleop/start", {});
+-      A.ok("双臂同步遥操作已启动", alertSel);
+-      A.refreshStatus();
+-    }, alertSel);
+-  });
+-  A.click("btnDualStop", function () {
+-    A.action(async function () {
+-      await A.stop();
+-      A.ok("已发送全局急停", alertSel);
+-      A.refreshStatus();
+-    }, alertSel);
+-  });
+-
+-  A.el("dualRecordForm").addEventListener("submit", function (e) {
+-    e.preventDefault();
+-    A.action(async function () {
+-      await A.saveConfig({ dataset: A.formData(A.el("dualRecordForm")) });
+-      A.ok("采集参数已保存", alertSel);
+-    }, alertSel);
+-  });
+-  A.click("btnDualRecord", function () {
+-    A.action(async function () {
+-      await A.saveConfig({ dataset: A.formData(A.el("dualRecordForm")) });
+-      await A.api.post("/api/record/start", {});
+-      A.ok("双臂采集已启动（命令见日志与命令预览）", alertSel);
+-      A.refreshStatus();
+-    }, alertSel);
+-  });
+-  [["btnDualKeyRight", "right"], ["btnDualKeyLeft", "left"], ["btnDualKeyEsc", "esc"]]
+-    .forEach(function (pair) {
+-      A.click(pair[0], function () {
+-        A.action(async function () {
+-          await A.api.post("/api/record/key", { key: pair[1] });
+-          A.ok("已发送按键 " + pair[1].toUpperCase(), alertSel);
+-        }, alertSel);
+-      });
+-    });
+-
+-  A.click("btnDualFeatures", function () {
+-    A.action(async function () {
+-      var f = A.q('#dualTrainForm [name="repo_id"]');
+-      var rid = f ? f.value : "";
+-      var r = await A.api.get("/api/dual/features?repo_id=" + encodeURIComponent(rid));
+-      var box = A.el("dualFeatureBox");
+-      if (!r.found) {
+-        box.innerHTML = "<strong>" + esc(r.root) + "</strong><br>" + esc(r.note);
+-        A.setAlert(alertSel, r.note, "warn");
+-        return;
+-      }
+-      var feats = (r.features || []).map(function (x) {
+-        return "<code>" + esc(x.key) + "</code> " + esc(JSON.stringify(x.shape));
+-      }).join("　");
+-      box.innerHTML = "<strong>" + esc(r.repo_id) + "</strong> · " +
+-        esc(r.total_episodes) + " 集 / " + esc(r.total_frames) + " 帧<br>" +
+-        "state_dim = <strong>" + esc(r.state_dim) + "</strong>，" +
+-        "action_dim = <strong>" + esc(r.action_dim) + "</strong>，" +
+-        "相机：" + esc((r.cameras || []).join("、") || "无") + "<br>" +
+-        "特征：" + feats + "<br>" + esc(r.note);
+-      A.ok(r.dual_likely ? "数据集特征符合双臂采集" : "数据集已读取，请人工核对维度", alertSel);
+-    }, alertSel);
+-  });
+-  A.click("btnDualTrain", function () {
+-    A.action(async function () {
+-      var params = A.formData(A.el("dualTrainForm"));
+-      await A.api.post("/api/train/start", { backend: "lerobot", params: params });
+-      A.ok("双臂训练已启动；数据集维度校验结果见执行日志", alertSel);
+-      A.refreshStatus();
+-    }, alertSel);
+-  });
+-
+-  A.el("dualEvalForm").addEventListener("submit", function (e) {
+-    e.preventDefault();
+-    A.action(async function () {
+-      await A.saveConfig({ eval: A.formData(A.el("dualEvalForm")) });
+-      A.ok("评估参数已保存", alertSel);
+-    }, alertSel);
+-  });
+-  A.click("btnDualEval", function () {
+-    A.action(async function () {
+-      await A.saveConfig({ eval: A.formData(A.el("dualEvalForm")) });
+-      await A.api.post("/api/eval", {});
+-      A.ok("双臂评估已启动，请注意真机工作空间", alertSel);
+-      A.refreshStatus();
+-    }, alertSel);
+-  });
+-  A.click("btnPreview", preview);
+-  A.change("previewKind", preview);
+-
+-  A.onStatus(renderStatus);
+-
+-  /* ---------------- 初始化 ---------------- */
+-  try {
+-    await loadConfig();
+-    await loadOptions();
+-    await loadPorts(true);
+-    await loadPlan(val("coordination") || "sync", true);
+-    renderStatus(A.status());
+-    await preview();
+-    dualReady = true;
+-  } catch (e) {
+-    A.setAlert(alertSel, "初始化失败：" + e.message, "err");
+-  }
+-})();

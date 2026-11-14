@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>总览 · 机械臂控制台</title>
+  <link rel="icon" type="image/svg+xml" href="/static/img/logo.svg">
+  <link rel="stylesheet" href="/static/css/style.css?v=3.4.1-20261114-2">
+</head>
+<body>
+  <div id="shell"></div>
+  <div id="page" class="page">
+    <div id="homeAlert" class="alert"></div>
+
+    <div class="section-toolbar"><div><h2>开始工作</h2><p>从设备连接，到技能采集与训练</p></div></div>
+    <div class="workflow-links">
+      <a class="workflow-link" href="/p/connect" id="homeConnectLink" aria-disabled="true" tabindex="-1"><small>01 · 设备</small><strong>连接机械臂</strong><span>选择串口与完成校准 →</span></a>
+      <a class="workflow-link" href="/p/camera"><small>02 · 视觉</small><strong>检查相机画面</strong><span>配置与预览多路设备 →</span></a>
+      <a class="workflow-link" href="/p/dataset"><small>03 · 示教</small><strong>采集技能数据</strong><span>管理独立技能的数据集 →</span></a>
+      <a class="workflow-link" href="/p/train"><small>04 · 策略</small><strong>训练模型</strong><span>设置训练任务与查看进度 →</span></a>
+    </div>
+    <div class="grid3">
+      <div class="card">
+        <div class="card-h"><h2>运行环境（服务端真机）</h2></div>
+        <dl class="kv" id="kvEnv"></dl>
+      </div>
+      <div class="card">
+        <div class="card-h"><h2>机械臂连接</h2></div>
+        <dl class="kv" id="kvArm"></dl>
+      </div>
+      <div class="card">
+        <div class="card-h"><h2>当前任务</h2></div>
+        <dl class="kv" id="kvJob"></dl>
+      </div>
+    </div>
+
+
+
+    <details class="card advanced-settings">
+      <summary>主机与访问设备信息</summary>
+      <div class="grid2">
+        <div>
+          <h3 class="sub-title">服务端真机 · 硬件与环境状态所在机器</h3>
+          <dl class="kv" id="kvServer"></dl>
+        </div>
+        <div>
+          <h3 class="sub-title">当前访问设备 · 只用于查看与操作</h3>
+          <dl class="kv" id="kvClient"></dl>
+        </div>
+      </div>
+      <div class="note" style="margin-top:14px">
+        浏览器没有权限读取访问端本机的串口、摄像头或 conda 环境，因此所有设备看到的都是同一份服务端真机状态。
+        要控制另一台设备上的硬件，请在那台设备上运行 <code>python start.py --lan</code>，
+        再从它的局域网地址打开本页（可在「本机设置 · 切换到另一台真机」里填写地址）。
+      </div>
+    </details>
+    <div class="card">
+      <div class="card-h"><h2>最近日志</h2>
+        <span class="sub"><label class="check"><input type="checkbox" id="logAuto" checked> 自动滚动</label></span>
+      </div>
+      <div class="log" id="logPanel"></div>
+    </div>
+  </div>
+  <script src="/static/js/common.js?v=3.4.1-20261114-2"></script>
+  <script src="/static/js/autosave.js?v=3.4.1-20261114-2"></script>
+  <script src="/static/js/home.js?v=3.4.1-20261114-2"></script>
+</body>
+</html>

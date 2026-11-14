@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>环境安装 · 机械臂控制台</title>
+  <link rel="icon" type="image/svg+xml" href="/static/img/logo.svg">
+  <link rel="stylesheet" href="/static/css/style.css?v=3.4.1-20261114-2">
+</head>
+<body>
+  <div id="shell"></div>
+  <div id="page" class="page">
+    <div id="setupAlert" class="alert"></div>
+
+    <div class="card">
+      <div class="card-h"><h2>安装源</h2><span class="sub">清华 pip 源 + gh-proxy 仓库加速</span></div>
+      <form id="setupForm">
+        <div class="row">
+          <div class="field wide"><label>LeRobot 仓库地址</label><input name="repo_url"></div>
+          <div class="field wide"><label>pip 镜像源</label><input name="pip_index"></div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <div class="field wide"><label>Miniforge 下载地址</label><input name="conda_url"></div>
+          <label class="check"><input type="checkbox" name="with_ffmpeg"> 安装 ffmpeg（文档要求 7.X）</label>
+        </div>
+        <div class="btn-row" style="margin-top:14px"><button class="btn subtle" type="submit">保存安装源</button></div>
+      </form>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>一键安装</h2><span class="sub">单一入口：上方检测卡发起安装，进度就在本卡片内显示</span></div>
+      <div id="lerobotCard"></div>
+      <div class="btn-row">
+        <button class="btn" id="btnInstallConda">一键安装 Miniforge/conda</button>
+        <button class="btn subtle" id="btnCreateEnv">创建虚拟环境</button>
+        <a class="btn" href="/">返回启动向导</a>
+        <button class="btn danger" id="btnStop">全局急停</button>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <div class="field narrow"><label>环境名</label><input id="setupEnvName" value="lerobot"></div>
+        <div class="field narrow"><label>Python 版本</label><input id="setupEnvPy" value="3.12"></div>
+      </div>
+      <div id="envLocationBox"></div>
+      <div class="note" style="margin-top:14px">
+        LeRobot 安装链：<code>git clone</code>（gh-proxy）→ <code>pip install -e</code>（清华源）→
+        幻尔主臂插件 <code>lerobot-teleoperator-rebot-arm-102</code> + Seeed 从臂插件
+        <code>lerobot-robot-seeed-b601</code> + <code>motorbridge</code> → Web/相机依赖。
+        所有 pip 均带 <code>--timeout 15 --retries 2</code>，git 带低速超时保护（Ubuntu 额外用 GNU timeout 兜底）。
+        检测到系统已安装 LeRobot 时，点检测卡里的「一键安装 LeRobot」会直接复用、跳过克隆与主程序安装，
+        只补真正缺失的依赖；需要完整重装请用「强制重新安装」。安装启动后，本卡片会持续显示步骤、耗时、
+        最近输出与进度条，即使命令暂时没有输出也有心跳提示，可随时点进度条上的急停终止。
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>文档命令中心</h2><span class="sub" id="cmdSub">点击即在当前服务端真实执行该命令；Windows 下 Linux 专属命令已自动隐藏</span></div>
+      <div class="row" style="margin-bottom:12px" id="sudoRow">
+        <div class="field"><label>sudo 密码（执行含 sudo 的命令时需要，仅 Ubuntu）</label>
+          <input type="password" id="sudoPwd" autocomplete="off" placeholder="不保存、不回显"></div>
+      </div>
+      <div class="scroll">
+        <table class="table" id="cmdTable">
+          <thead><tr><th>分组</th><th>命令</th><th></th></tr></thead>
+          <tbody><tr><td colspan="3" class="muted">正在读取 …</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>执行日志</h2>
+        <span class="sub"><label class="check"><input type="checkbox" id="logAuto" checked> 自动滚动</label></span>
+      </div>
+      <div class="log" id="logPanel"></div>
+    </div>
+  </div>
+  <script src="/static/js/common.js?v=3.4.1-20261114-2"></script>
+  <script src="/static/js/autosave.js?v=3.4.1-20261114-2"></script>
+  <script src="/static/js/setup.js?v=3.4.1-20261114-2"></script>
+</body>
+</html>

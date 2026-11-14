@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>视觉数据 · 机械臂控制台</title>
+  <link rel="icon" href="/static/img/logo.svg">
+  <link rel="stylesheet" href="/static/css/style.css?v=3.4.1-20261114-2">
+</head>
+<body>
+  <div id="shell"></div>
+  <div id="page" class="page">
+    <div id="yoloAlert" class="alert"></div>
+
+    <div class="card">
+      <div class="card-h"><h2>YOLO 数据集</h2><span class="sub">导入 / 采集 / 标注 / 训练，全部在本机完成</span></div>
+      <div class="row">
+        <div class="field wide"><label>当前数据集</label><select id="dsSelect"></select></div>
+        <div class="btn-row">
+          <button class="btn subtle" type="button" id="btnDsRefresh">刷新</button>
+          <button class="btn subtle" type="button" id="btnClassMgr">类别管理（增删改）</button>
+          <button class="btn danger" type="button" id="btnDsDelete">删除数据集</button>
+        </div>
+      </div>
+      <div id="dsStats" class="hint" style="margin-top:8px">还没有选择数据集</div>
+
+      <hr>
+      <div class="row">
+        <div class="field"><label>新数据集名</label><input id="newName" placeholder="例如 cube_v1"></div>
+        <div class="field wide"><label>类别（逗号分隔）</label><input id="newClasses" placeholder="例如 blue_cube, red_cube"></div>
+        <div class="btn-row"><button class="btn primary" type="button" id="btnDsCreate">新建数据集</button></div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <div class="field wide"><label>导入 YOLO 格式 zip（Roboflow / Ultralytics）</label><input id="zipFile" type="file" accept=".zip"></div>
+        <div class="btn-row"><button class="btn" type="button" id="btnImport">导入 zip</button></div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <div class="field narrow"><label>摄像头 index</label><input id="camIndex" type="number" value="0"></div>
+        <div class="field narrow"><label>验证集比例</label>
+          <input id="valRatio" type="number" min="0.05" max="0.5" step="0.05" value="0.2"></div>
+        <div class="btn-row">
+          <button class="btn subtle" type="button" id="btnCapture">采集一张</button>
+          <button class="btn subtle" type="button" id="btnSplit">按比例划分验证集</button>
+        </div>
+      </div>
+      <div class="hint" style="margin-top:8px">采集请先关闭「数据采集」任务，UVC 摄像头同一时间只能被一个程序占用。</div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>本地自动标注（Grounding DINO）</h2>
+        <span class="sub">纯本地推理，不联网、不花钱；自动提示词，只使用数据集已有类别</span></div>
+      <div class="row" style="margin-top:4px">
+        <div class="field narrow"><label>置信度阈值</label>
+          <input id="dinoConf" type="number" min="0.05" max="0.9" step="0.05" value="0.2"></div>
+        <div class="field narrow"><label>最多框数</label>
+          <input id="dinoMax" type="number" min="1" max="300" value="100"></div>
+        <div class="btn-row">
+          <button class="btn primary" type="button" id="btnDino">本地 Grounding DINO 预标注</button>
+          <span class="hint" id="llmState"></span>
+        </div>
+      </div>
+      <details class="hint" style="margin-top:8px">
+        <summary>本地 Grounding DINO 安装命令（已安装可跳过）</summary>
+        <pre style="white-space:pre-wrap;margin:8px 0 0">pip install -U transformers timm -i https://pypi.tuna.tsinghua.edu.cn/simple
+export HF_ENDPOINT=https://hf-mirror.com
+python -c "from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection as M; m='IDEA-Research/grounding-dino-tiny'; AutoProcessor.from_pretrained(m); M.from_pretrained(m); print('ok')"</pre>
+      </details>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>标注</h2><span class="sub">拖拽画框；点击框选中；训练集图片保存后自动复制到验证集</span></div>
+      <div class="row">
+        <div class="field narrow"><label>查看</label><select id="splitSel">
+          <option value="train">训练集 train</option>
+          <option value="val">验证集 val</option>
+        </select></div>
+        <div class="field wide"><label>绘图类别（用于新框）</label>
+          <div style="display:flex;gap:6px;align-items:center">
+            <select id="clsSel" style="flex:1"></select>
+            <button class="btn subtle sm" type="button" id="btnAddClass" title="添加类别">＋ 类别</button>
+            <button class="btn subtle sm" type="button" id="btnApplyClass" title="把下拉里的类别应用到选中的框">编辑选中框</button>
+          </div>
+        </div>
+        <div class="field wide"><label>选中框</label><div id="selInfo" class="hint">未选中</div></div>
+      </div>
+      <div class="toolbar-row" style="margin-top:12px">
+        <div class="btn-row">
+          <button class="btn subtle sm" type="button" id="btnPrev">← 上一张</button>
+          <button class="btn subtle sm" type="button" id="btnNext">下一张 →</button>
+        </div>
+        <div class="btn-row toolbar-sep">
+          <button class="btn primary sm" type="button" id="btnSaveLabel">保存标注</button>
+          <span class="hint" id="saveState"></span>
+        </div>
+        <div class="btn-row toolbar-sep">
+          <button class="btn danger sm" type="button" id="btnDelBox">删除选中框</button>
+        </div>
+        <div class="btn-row toolbar-sep">
+          <button class="btn danger sm" type="button" id="btnDelImage">删除图片</button>
+        </div>
+      </div>
+      <div class="yolo-grid" style="margin-top:12px">
+        <div class="yolo-list" id="imgList"></div>
+        <div class="yolo-canvas-wrap">
+          <canvas id="annotCanvas"></canvas>
+          <div id="annotHint" class="hint" style="padding:10px">从左侧选择一张图片开始标注</div>
+          <div id="aiOverlay" class="ai-overlay" hidden>
+            <div class="ai-overlay-box">
+              <span class="state-spin" aria-hidden="true"></span>
+              <div>自动标注中，请稍候…</div>
+              <div class="hint">完成后自动刷新，请勿手动标注</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <div class="field wide"><label>手动标注（每行：class cx cy w h，归一化 0~1）</label>
+          <textarea id="labelText" rows="4" spellcheck="false"
+            placeholder="0 0.500000 0.500000 0.200000 0.150000"></textarea></div>
+        <div class="btn-row"><button class="btn subtle" type="button" id="btnApplyText">应用文本</button></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>验证 YOLO 效果</h2><span class="sub">选模型 + 图片/摄像头，直接看检测结果</span></div>
+      <div class="row">
+        <div class="field wide"><label>模型 (.pt)</label><select id="valModel"></select></div>
+        <div class="btn-row"><button class="btn subtle" type="button" id="btnReloadModels">刷新模型</button></div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <div class="field"><label>图片来源</label><select id="valSource">
+          <option value="current">当前打开的图片</option>
+          <option value="val">验证集随机一张</option>
+          <option value="camera">摄像头采集</option>
+        </select></div>
+        <div class="field narrow"><label>置信度</label><input id="valConf" type="number" step="0.05" value="0.25"></div>
+        <div class="btn-row"><button class="btn primary" type="button" id="btnValidate">运行验证</button></div>
+      </div>
+      <div id="valResult" style="margin-top:12px">
+        <div class="hint" id="valHint">选择模型后点「运行验证」</div>
+        <img id="valImg" alt="" style="display:none" />
+        <div id="valDets" class="hint" style="margin-top:8px"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>训练 YOLO</h2><span class="sub">使用当前数据集，训练完成后可导出 .pt</span></div>
+      <div class="row">
+        <div class="field"><label>预训练权重</label><input id="yModel" value="yolov8n.pt"></div>
+        <div class="field narrow"><label>epochs</label><input id="yEpochs" type="number" value="50"></div>
+        <div class="field narrow"><label>imgsz</label><input id="yImgsz" type="number" value="640"></div>
+        <div class="field narrow"><label>batch</label><input id="yBatch" type="number" value="8"></div>
+        <div class="field narrow"><label>device</label><input id="yDevice" value="cuda"></div>
+      </div>
+      <div class="btn-row" style="margin-top:14px">
+        <button class="btn primary" type="button" id="btnTrainYolo">开始训练</button>
+        <span class="muted" id="trainHint">训练输出保存到 outputs/train/yolo</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>执行日志</h2><span class="sub"><label class="check"><input type="checkbox" id="logAuto" checked> 自动滚动</label></span></div>
+      <div class="log" id="logPanel"></div>
+    </div>
+  </div>
+  <script src="/static/js/common.js?v=3.4.1-20261114-2"></script>
+  <script src="/static/js/autosave.js?v=3.4.1-20261114-2"></script>
+  <script src="/static/js/yolo.js?v=3.4.1-20261114-2"></script>
+</body>
+</html>

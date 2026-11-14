@@ -1,0 +1,24 @@
+--- a/config_bi_seeed_b601_dm_follower.py
++++ b/config_bi_seeed_b601_dm_follower.py
+@@ -12,6 +12,11 @@
+     port: str = ""
+     id: str | None = None
+     can_adapter: str = "damiao"
++    force_pos_torque_ration: float = 0.12
++
++    def __post_init__(self):
++        if not 0 < self.force_pos_torque_ration <= 1:
++            raise ValueError("夹爪力矩上限必须大于 0 且不超过 1")
+ 
+ 
+ @RobotConfig.register_subclass("bi_seeed_b601_dm_follower")
+--- a/bi_seeed_b601_dm_follower.py
++++ b/bi_seeed_b601_dm_follower.py
+@@ -30,6 +30,7 @@
+                 port=arm_cfg.port,
+                 id=arm_id,
+                 can_adapter=arm_cfg.can_adapter or "damiao",
++                force_pos_torque_ration=arm_cfg.force_pos_torque_ration,
+                 cameras=cameras,
+             ))
+ 

@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>设备连接与校准 · reBot 控制台</title><link rel="icon" href="/static/img/logo.svg"><link rel="stylesheet" href="/static/css/style.css?v=3.4.1-20261114-2"></head>
+<body><div id="shell"></div><main id="page" class="page">
+ <div id="connAlert" class="alert"></div>
+ <section class="card"><div class="card-h"><h2>机器人配置</h2><span class="badge" id="currentMode">读取中…</span></div>
+ <div class="mode-settings"><div class="field"><label for="robotMode">控制对象</label><select id="robotMode" disabled><option value="single">单臂 · 一主一从</option><option value="dual">双臂 · 左右各一主一从</option></select></div>
+ <span class="hint">选择后自动保存并应用</span></div>
+ <p class="hint" id="modeHint">正在读取当前配置</p></section>
+ <section class="card" id="deviceSettings"><div class="card-h"><h2 id="connectionTitle">机械臂连接</h2><span class="badge" id="connState">读取中…</span></div>
+ <div data-mode="single" hidden><div class="row"><div class="field"><label for="leaderPort">主臂串口</label><select id="leaderPort" class="port-selector"></select></div><div class="field"><label for="followerPort">从臂串口</label><select id="followerPort" class="port-selector"></select></div></div>
+ <details class="device-parameters"><summary>设备参数与夹持力矩</summary><div class="row">
+ <div class="field"><label for="followerId">从臂 ID</label><input id="followerId"></div><div class="field"><label for="leaderId">主臂 ID</label><input id="leaderId"></div><div class="field"><label for="singleCan">CAN 适配器</label><input id="singleCan"></div><div class="field"><label for="singleGripForce">夹爪力矩上限 (0–1)</label><input id="singleGripForce" type="number" min="0.01" max="1" step="0.01"></div></div></details></div>
+ <div data-mode="dual" hidden><div class="dual-arm-grid"><section class="dual-arm-box" aria-label="左臂设备配置"><h3>左臂</h3>
+ <div class="row"><div class="field"><label for="left_follower">从臂串口 · B601-DM</label><select id="left_follower" class="port-selector"></select></div><div class="field"><label for="left_leader">主臂串口 · Leader</label><select id="left_leader" class="port-selector"></select></div></div>
+ <details class="device-parameters"><summary>设备参数与夹持力矩</summary>
+ <div class="row"><div class="field"><label for="leftFollowerId">从臂 ID</label><input id="leftFollowerId"></div><div class="field"><label for="leftLeaderId">主臂 ID</label><input id="leftLeaderId"></div></div>
+ <div class="row"><div class="field"><label for="leftCan">CAN 适配器</label><input id="leftCan"></div><div class="field"><label for="leftGripForce">夹爪力矩上限 (0–1)</label><input id="leftGripForce" type="number" step="0.01" min="0.01" max="1"></div></div>
+ <div class="row"><div class="field"><label for="leftFollowerType">从臂类型</label><input id="leftFollowerType"></div><div class="field"><label for="leftLeaderType">主臂类型</label><input id="leftLeaderType"></div></div>
+ </details></section><section class="dual-arm-box" aria-label="右臂设备配置"><h3>右臂</h3>
+ <div class="row"><div class="field"><label for="right_follower">从臂串口 · B601-DM</label><select id="right_follower" class="port-selector"></select></div><div class="field"><label for="right_leader">主臂串口 · Leader</label><select id="right_leader" class="port-selector"></select></div></div>
+ <details class="device-parameters"><summary>设备参数与夹持力矩</summary>
+ <div class="row"><div class="field"><label for="rightFollowerId">从臂 ID</label><input id="rightFollowerId"></div><div class="field"><label for="rightLeaderId">主臂 ID</label><input id="rightLeaderId"></div></div>
+ <div class="row"><div class="field"><label for="rightCan">CAN 适配器</label><input id="rightCan"></div><div class="field"><label for="rightGripForce">夹爪力矩上限 (0–1)</label><input id="rightGripForce" type="number" step="0.01" min="0.01" max="1"></div></div>
+ <div class="row"><div class="field"><label for="rightFollowerType">从臂类型</label><input id="rightFollowerType"></div><div class="field"><label for="rightLeaderType">主臂类型</label><input id="rightLeaderType"></div></div>
+ </details></section></div>
+ <section class="dual-plugin-config"><div class="card-h"><h3>双臂设备类型</h3><button class="btn" id="btnProbeTypes" data-app-nofb>检测双臂类型</button></div>
+ <p class="hint" id="typeProbeHint" role="status" aria-live="polite">从当前环境读取真实注册类型；检测后可应用匹配的 B601-DM / Leader 插件。</p>
+ <div class="btn-row"><button class="btn subtle" id="btnApplyTypes" data-app-nofb hidden>应用匹配的双臂类型</button></div>
+ <div class="row"><div class="field"><label for="dualRobotType">复合机器人类型</label><input id="dualRobotType" list="robotTypeList"><datalist id="robotTypeList"></datalist></div><div class="field"><label for="dualTeleopType">复合主臂类型</label><input id="dualTeleopType" list="teleopTypeList"><datalist id="teleopTypeList"></datalist></div></div>
+ <details class="device-parameters"><summary>高级子臂字段配置</summary>
+ <div class="row"><div class="field"><label for="leftPrefix">左子臂字段名</label><input id="leftPrefix"></div><div class="field"><label for="rightPrefix">右子臂字段名</label><input id="rightPrefix"></div></div>
+ </details></section></div>
+ <div class="device-actions"><span class="save-state">设备参数自动保存</span><div class="btn-row"><button class="btn subtle" id="btnScanPorts" data-app-nofb>扫描串口</button><button class="btn primary" id="btnConnect" data-app-nofb disabled>连接</button><button class="btn subtle" id="btnDisconnect" data-app-nofb disabled>断开</button></div></div>
+ <details class="device-parameters"><summary>已发现的串口设备 <span id="portCount"></span></summary><div class="scroll"><table class="table" id="portTable"><thead><tr><th>串口</th><th>设备</th><th>权限</th><th>分配给</th></tr></thead><tbody></tbody></table></div></details>
+ </section>
+ <section class="card" id="calibration"><div class="card-h"><h2>机械臂校准</h2><span class="sub">按设备分别校准</span></div>
+ <div class="btn-row" data-mode="single" hidden><button class="btn" data-calibrate="leader" disabled>校准主臂</button><button class="btn" data-calibrate="follower" disabled>校准从臂</button></div>
+ <div class="calibration-grid" data-mode="dual" hidden><div><h3>左臂</h3><div class="btn-row"><button class="btn" data-calibrate="left:leader" disabled>校准左主臂</button><button class="btn" data-calibrate="left:follower" disabled>校准左从臂</button></div></div><div><h3>右臂</h3><div class="btn-row"><button class="btn" data-calibrate="right:leader" disabled>校准右主臂</button><button class="btn" data-calibrate="right:follower" disabled>校准右从臂</button></div></div></div>
+ <p class="hint">校准前先完成设备连接。命令需要输入时会弹出全局输入框；也可随时点击顶部“命令输入”。动作结束后可点击顶部“收工归零并失能”。</p>
+ <details class="device-parameters"><summary>校准缓存与环境诊断</summary><div class="btn-row"><button class="btn subtle" id="btnClearRobots">清理从臂校准缓存</button><button class="btn subtle" id="btnClearTeleop">清理主臂校准缓存</button><button class="btn subtle" id="btnCheckEnv">环境检查</button></div></details></section>
+ <section class="card" id="zeroAdjust"><div class="card-h"><h2>从臂零点调整</h2><span class="sub">单关节 / 整臂 · 明确确认后写入</span></div>
+ <p class="hint">只有物理零位不正确时才重新设零。控制模式寄存器 10 超时属于通信问题，不能通过随意改零点解决。设零前托住机械臂、释放力矩，按官方零位姿态手动摆放；夹爪应完全闭合。</p>
+ <div class="row"><div class="field"><label for="zeroArm">目标从臂</label><select id="zeroArm"><option value="left">当前从臂</option></select></div></div>
+ <div class="zero-joints" id="zeroJoints">
+ <label class="check"><input type="checkbox" id="zeroJoint1" value="1">1 · 底座旋转</label><label class="check"><input type="checkbox" id="zeroJoint2" value="2">2 · 肩部</label><label class="check"><input type="checkbox" id="zeroJoint3" value="3">3 · 肘部</label><label class="check"><input type="checkbox" id="zeroJoint4" value="4">4 · 腕部俯仰</label><label class="check"><input type="checkbox" id="zeroJoint5" value="5">5 · 腕部偏航</label><label class="check"><input type="checkbox" id="zeroJoint6" value="6">6 · 腕部旋转</label><label class="check"><input type="checkbox" id="zeroJoint7" value="7" checked>7 · 夹爪</label></div>
+ <div class="btn-row"><button class="btn subtle" id="zeroSelectAll" data-app-nofb>全选关节</button><button class="btn" id="zeroRead" data-app-nofb disabled>读取实测角度</button><button class="btn" id="zeroRelease" data-app-nofb disabled>释放力矩，手动摆零</button><button class="btn danger" id="zeroSet" data-app-nofb disabled>将所选关节当前位置设为零</button></div>
+ <div class="btn-row"><span class="hint" id="zeroService" role="status" aria-live="polite">正在检查零点服务…</span><button class="btn subtle sm" id="zeroRetryService" data-app-nofb hidden>重新检测服务</button></div>
+ <p class="hint" id="zeroState" role="status" aria-live="polite">尚未读取；实测角度不会自动替换校准零点。</p><div id="zeroAlert" class="alert"></div>
+ <div class="scroll"><table class="table"><thead><tr><th>关节</th><th>实测角度</th><th>力矩状态</th></tr></thead><tbody id="zeroReadings"><tr><td colspan="3">点击“读取实测角度”查看当前从臂。</td></tr></tbody></table></div>
+ </section>
+     <details class="card advanced-settings" id="permissionsSection">
+      <summary id="permTitle">权限与 USB 设备授权</summary><p class="hint" id="permSub">设备无法读写时在此授权</p>
+      <div class="note" id="permNote">
+        <code>sudo chmod 666 /dev/ttyUSB*</code>（幻尔主臂） ·
+        <code>sudo chmod 666 /dev/ttyACM*</code>（B601-DM 串口桥）
+      </div>
+      <div class="row" style="margin-top:14px" id="permSudoRow">
+        <div class="field wide" id="sudoPwdField"><label>sudo 密码（仅本次使用，不保存）</label>
+          <input type="password" id="sudoPwd" autocomplete="off"></div>
+        <div class="btn-row">
+          <button class="btn primary" id="btnChmod">授权串口</button>
+          <button class="btn subtle" id="btnChmodUsb">授权 USB 相机</button>
+          <button class="btn subtle" id="btnCheckPerm">检查权限</button>
+        </div>
+      </div>
+      <div class="scroll" style="margin-top:14px">
+        <table class="table" id="permTable">
+          <thead><tr><th>设备</th><th id="permModeTh">权限</th><th id="permStateTh">状态</th></tr></thead>
+          <tbody><tr><td colspan="3" class="muted">正在检测 …</td></tr></tbody>
+        </table>
+      </div>
+    </details>
+ <section class="card"><div class="card-h"><h2>接下来</h2><span class="sub">单臂与双臂使用同一套功能入口</span></div><div class="btn-row"><a class="btn" href="/p/teleop">遥操作</a><a class="btn" href="/p/dataset">采集数据</a><a class="btn" href="/p/train">模型训练</a><a class="btn" href="/p/eval">策略评估</a></div></section>
+ </main><script src="/static/js/common.js?v=3.4.1-20261114-2"></script><script src="/static/js/connect.js?v=3.4.1-20261114-2"></script>
+  <script src="/static/js/autosave.js?v=3.4.1-20261114-2"></script><script src="/static/js/zero-adjust.js?v=3.4.1-20261114-2"></script></body></html>

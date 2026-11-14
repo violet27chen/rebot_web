@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>模型训练 · 机械臂控制台</title>
+  <link rel="icon" type="image/svg+xml" href="/static/img/logo.svg">
+  <link rel="stylesheet" href="/static/css/style.css?v=3.4.1-20261114-2">
+</head>
+<body>
+  <div id="shell"></div>
+  <div id="page" class="page">
+    <div id="trainAlert" class="alert"></div>
+
+    <div class="card">
+      <div class="card-h"><h2>选择训练引擎</h2><span class="sub">选择后会调用对应的真实训练代码，不写死单一实现</span></div>
+      <div class="radio-cards" id="engineCards"></div>
+      <div class="note" style="margin-top:14px" id="engineDesc">正在读取引擎信息 …</div>
+      <div id="depBox" class="alert"></div>
+      <div class="btn-row">
+        <button class="btn subtle icon" id="btnCheckBackends" data-icon="refresh" title="重新检测训练引擎依赖" aria-label="重新检测训练引擎依赖" data-label="重新检测训练引擎依赖"></button>
+        <button class="btn primary" id="btnInstallDeps">安装所选引擎依赖（清华源）</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>训练参数</h2><span class="sub" id="paramsTitle">LeRobot</span></div>
+
+      <div id="params-lerobot">
+        <div class="row">
+          <div class="field wide"><label>数据集 repo_id</label><select id="l_repo_id"></select></div>
+          <div class="field narrow"><label>策略类型</label><select id="l_policy_type">
+            <option value="act">ACT</option>
+            <option value="diffusion">Diffusion</option>
+            <option value="smolvla">SmolVLA 微调</option>
+          </select></div>
+          <div class="field narrow"><label>steps</label><input id="l_steps" type="number" value="300000"></div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <div class="field wide"><label>数据集目录（可选，优先于上面的 repo_id）</label>
+            <input id="l_dataset_dir" placeholder="不填则用 repo_id；点右侧「浏览目录」选择" readonly></div>
+          <div class="btn-row">
+            <button class="btn subtle" type="button" id="btnBrowseDs">浏览目录</button>
+            <button class="btn subtle" type="button" id="btnFillDs">填入</button>
+            <button class="btn subtle" type="button" id="btnClearDs">清除</button>
+          </div>
+        </div>
+        <div class="hint" id="dsDirInfo" style="margin-top:6px">平台录制目录：读取中…</div>
+
+        <div class="dataset-features"><div class="section-toolbar"><strong>数据集特征</strong><button class="btn subtle sm" id="btnCheckFeatures" data-app-nofb>重新检查</button></div><p class="hint" id="datasetFeatures" aria-live="polite">选择数据集后自动检查动作、状态和相机特征。</p></div>
+        <div class="row" style="margin-top:12px">
+          <div class="field"><label>batch_size（0 = 默认）</label><input id="l_batch_size" type="number" value="0"></div>
+          <div class="field"><label>device</label><input id="l_device" value="cuda"></div>
+          <div class="field"><label>video_backend</label><input id="l_video_backend" placeholder="留空使用默认"></div>
+          <div class="field wide" id="baseModelRow"><label>基础模型（仅 SmolVLA 用，ACT 请留空）</label>
+            <input id="l_base_model" placeholder="lerobot/smolvla_base"></div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <div class="field wide"><label>输出目录</label><input id="l_output_dir"></div>
+          <div class="field"><label for="l_job_name">输出模型名</label><input id="l_job_name" placeholder="可留空自动生成，例如 act_20261113_203000"><small>用作 LeRobot job_name；留空时启动训练自动生成。模型文件保存位置由输出目录指定。</small></div>
+          <label class="check"><input type="checkbox" id="l_wandb"> 启用 wandb</label>
+        </div>
+      </div>
+
+      <div id="params-yolo" hidden>
+        <div class="row">
+          <div class="field wide"><label>data.yaml 路径（与数据集目录二选一）</label><input id="y_data_yaml" placeholder="/path/to/data.yaml"></div>
+          <div class="field wide"><label>数据集目录（自动生成 data.yaml）</label><input id="y_dataset_dir" placeholder="/path/to/yolo_dataset"></div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <div class="field"><label>预训练权重 / 本地 .pt</label><input id="y_model" value="yolov8n.pt"></div>
+          <div class="field narrow"><label>epochs</label><input id="y_epochs" type="number" value="50"></div>
+          <div class="field narrow"><label>imgsz</label><input id="y_imgsz" type="number" value="640"></div>
+          <div class="field narrow"><label>batch</label><input id="y_batch" type="number" value="8"></div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <div class="field"><label>device（cpu / 0 / cuda:0）</label><input id="y_device" value="cpu"></div>
+          <div class="field wide"><label>输出目录</label><input id="y_output_dir"></div>
+        </div>
+        <div class="note" style="margin-top:14px">
+          YOLO 目录结构：<code>images/train</code>、<code>images/val</code>、<code>labels/train</code>、<code>labels/val</code>，
+          可选 <code>classes.txt</code>。每个 epoch 的真实 loss / mAP50 会推送到下方曲线。
+        </div>
+      </div>
+
+      <div id="params-opencv" hidden>
+        <div class="row">
+          <div class="field wide"><label>图像数据集目录（按类别分子目录）</label><input id="o_dataset_dir" placeholder="/path/to/images"></div>
+          <div class="field"><label>分类器</label>
+            <select id="o_classifier"><option value="svm">SVM（线性）</option><option value="knn">KNN</option></select>
+          </div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <div class="field narrow"><label>轮次</label><input id="o_epochs" type="number" value="20"></div>
+          <div class="field narrow"><label>特征图尺寸</label><input id="o_img_size" type="number" value="64"></div>
+          <div class="field wide"><label>输出目录</label><input id="o_output_dir"></div>
+        </div>
+        <div class="note" style="margin-top:14px">
+          OpenCV 目录结构：<code>&lt;dataset&gt;/类别A/*.jpg</code>、<code>&lt;dataset&gt;/类别B/*.jpg</code> …
+          提取 HSV + 梯度方向 + 灰度特征，训练 <code>cv2.ml.SVM</code> / <code>KNearest</code>，
+          输出真实的学习曲线与 <code>model.xml</code>。
+        </div>
+      </div>
+
+      <hr>
+      <div class="row">
+        <div class="field wide"><label>从已录制数据集填充目录</label><select id="dsPicker"></select></div>
+        <div class="btn-row"><button class="btn" id="btnUseDs">填入 YOLO/OpenCV 目录</button></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>Hugging Face 下载</h2><span class="sub">可选国内镜像；本地已有模型不会重复拉取</span></div>
+      <div class="row">
+        <div class="field wide"><label>下载源</label><select id="hfMode">
+          <option value="auto">自动（官方优先，失败用镜像）</option>
+          <option value="official">官方 huggingface.co</option>
+          <option value="mirror">国内镜像 hf-mirror.com</option>
+          <option value="custom">自定义地址</option>
+        </select></div>
+        <div class="field wide" id="hfCustomWrap" style="display:none">
+          <label>自定义地址</label><input id="hfEndpoint" placeholder="https://hf-mirror.com">
+        </div>
+        <div class="btn-row"><button class="btn subtle" type="button" id="btnHfTest">检测连通性</button></div>
+      </div>
+      <div class="hint" id="hfStatus" style="margin-top:10px">选择基础模型后显示本地缓存状态</div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>执行</h2><span class="sub" id="cmdPreview">选择引擎后显示将执行的命令结构</span></div>
+      <div class="btn-row">
+        <button class="btn primary" id="btnTrain">开始训练</button>
+        <button class="btn danger" id="btnStop">全局急停</button>
+        <button class="btn subtle" id="btnResume">恢复 LeRobot 训练</button>
+        <span class="muted" id="trainState"></span>
+      </div>
+    </div>
+
+    <details class="card advanced-settings"><summary>已保存配置的训练命令</summary><pre class="command-preview" id="trainCommandPreview">正在生成…</pre></details>
+    <div class="grid2">
+      <div class="card">
+        <div class="card-h"><h2>Loss 曲线</h2><span class="sub" id="lossCount">0 个指标点</span></div>
+        <div class="chart-wrap"><canvas id="lossChart"></canvas></div>
+        <div class="btn sm subtle" style="margin-top:10px"><button class="btn sm" id="btnClearLoss">清空曲线</button></div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h2>模型产出</h2><span class="sub">outputs/ 下真实扫描结果</span></div>
+        <div class="scroll" style="max-height:260px;overflow-y:auto">
+          <table class="table" id="ckptTable">
+            <thead><tr><th>路径</th><th>操作</th></tr></thead>
+            <tbody><tr><td class="muted">正在读取 …</td></tr></tbody>
+          </table>
+        </div>
+        <div class="btn sm subtle" style="margin-top:12px"><button class="btn sm" id="btnReloadCkpt">刷新</button></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>训练日志</h2>
+        <span class="sub"><label class="check"><input type="checkbox" id="logAuto" checked> 自动滚动</label></span>
+      </div>
+      <div class="log" id="logPanel"></div>
+    </div>
+  </div>
+  <script src="/static/js/common.js?v=3.4.1-20261114-2"></script>
+  <script src="/static/js/autosave.js?v=3.4.1-20261114-2"></script>
+  <script src="/static/js/train.js?v=3.4.1-20261114-2"></script>
+  <script src="/static/js/dataset-features.js?v=3.4.1-20261114-2"></script>
+</body>
+</html>

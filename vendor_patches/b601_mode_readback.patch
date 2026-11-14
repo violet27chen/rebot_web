@@ -1,0 +1,187 @@
+--- a/lerobot_robot_seeed_b601/seeed_b601_follower.py
++++ b/lerobot_robot_seeed_b601/seeed_b601_follower.py
+@@ -93,6 +93,7 @@
+         self.motors = {}
+         self.motor_names = list(config.motor_can_ids.keys())
+         self._in_safe_zero = False
++        self._connection_ready = False
+         self._emergency_disable_requested = False
+         # motor_name -> URDF q_idx, built once in connect(); None disables ff.
+         self._gravity_pairing = None
+@@ -147,6 +148,7 @@
+         if self.is_connected:
+             raise DeviceAlreadyConnectedError(f"{self} already connected")
+ 
++        self._connection_ready = False
+         logger.info(f"Connecting arm on {self.config.port} (adapter={self.config.can_adapter})...")
+         if self.config.can_adapter == "damiao":
+             self.bus = MotorBridgeController.from_dm_serial(
+@@ -176,7 +178,16 @@
+         for cam in self.cameras.values():
+             cam.connect()
+ 
+-        self.configure()
++        import sys
++        entry = sys.argv[0].replace(chr(92), "/").rsplit("/", 1)[-1].removesuffix(".exe").removesuffix(".py").replace("-", "_")
++        calibration_only = not calibrate and entry == "lerobot_calibrate"
++        if not calibration_only:
++            self._skip_safe_zero_on_disconnect = False
++            self.configure()
++        else:
++            # Only the calibration CLI is torque-off; replay can use calibrate=False.
++            self.bus.disable_all()
++            self._skip_safe_zero_on_disconnect = True
+ 
+         # Skip during the calibrate flow (calibrate=False); the gripper
+         # may not be homed yet and the probe would block connect().
+@@ -185,6 +196,7 @@
+ 
+         self._build_gravity_pairing()
+ 
++        self._connection_ready = not calibration_only
+         logger.info(f"{self} connected.")
+ 
+     @property
+@@ -263,22 +275,30 @@
+         """Configure motors with appropriate settings."""
+         # Keep torque off while switching modes, then enable after all motors are configured.
+         self.bus.disable_all()
+-        num_retry = 9
++        from .mode_safety import ensure_mode_checked
+         for motor_name, motor in self.motors.items():
+             target_mode = MotorBridgeMode.MIT if self.motor_type == "rs" else (
+-                MotorBridgeMode.FORCE_POS
+-                if motor_name == FOLLOWER_GRIPPER_MOTOR
+-                else MotorBridgeMode.POS_VEL
+-            )
+-            for _ in range(num_retry + 1):
+-                try:
+-                    motor.ensure_mode(target_mode)
+-                    break
+-                except Exception as e:
+-                    if _ == num_retry:
+-                        raise e
+-                    time.sleep(MEDIUM_TIMEOUT_SEC)
++                MotorBridgeMode.FORCE_POS if motor_name == FOLLOWER_GRIPPER_MOTOR else MotorBridgeMode.POS_VEL
++            )
++            try:
++                ensure_mode_checked(motor, target_mode)
++            except Exception as exc:
++                raise RuntimeError(f"{motor_name} mode {int(target_mode)} verification failed: {exc}") from exc
+             logger.info(f"{motor_name} ensure mode {target_mode}")
++        if self.motor_type != "rs":
++            # Even a recovered ACK must not bypass measured-position seeding.
++            for motor in self.motors.values():
++                motor.request_feedback()
++            time.sleep(0.03)
++            self.bus.poll_feedback_once()
++            states = {name: motor.get_state() for name, motor in self.motors.items()}
++            if any(state is None or not math.isfinite(state.pos) for state in states.values()):
++                raise RuntimeError("Measured positions missing before enable; startup aborted")
++            for name, motor in self.motors.items():
++                if name == FOLLOWER_GRIPPER_MOTOR:
++                    motor.send_force_pos(states[name].pos, 0.35, self.config.force_pos_torque_ration)
++                else:
++                    motor.send_pos_vel(states[name].pos, 0.35)
+         self.bus.enable_all()
+ 
+     def disable_torque(self) -> None:
+@@ -828,8 +848,10 @@
+ 
+     def disconnect(self):
+         """Disconnect from robot."""
+-        if not self.is_connected:
+-            raise DeviceNotConnectedError(f"{self} is not connected.")
++        if self.bus is None:
++            return
++        if not getattr(self, "_connection_ready", False):
++            self._skip_safe_zero_on_disconnect = True
+ 
+         if (
+             not self._in_safe_zero
+@@ -851,28 +873,27 @@
+         if incomplete:
+             logger.warning("disconnect: safe_zero incomplete, keeping torque (skip disable)")
+         for name, motor in self.motors.items():
+-            if self.config.disable_torque_on_disconnect and not incomplete:
+-                if name == FOLLOWER_GRIPPER_MOTOR and hold_gripper:
+-                    # 夹爪保持力矩：停掉其余关节，但给夹爪再发一次闭合位，
+-                    # 避免停机后弹簧/回弹把夹爪自动张开。
+-                    try:
+-                        target = float(getattr(self.config, "gripper_park_deg", 0.0))
+-                        motor.send_force_pos(math.radians(target), math.radians(20.0), 0.05)
+-                        logger.info(
+-                            "disconnect: gripper holding at %.1f° (torque kept on)", target)
+-                    except Exception as exc:  # noqa: BLE001
+-                        logger.warning("disconnect: gripper hold failed: %s", exc)
+-                else:
+-                    motor.disable()
+-            motor.clear_error()
+-            motor.close()
++            try:
++                if self.config.disable_torque_on_disconnect and not incomplete:
++                    if name == FOLLOWER_GRIPPER_MOTOR and hold_gripper and self._connection_ready:
++                        motor.send_force_pos(math.radians(float(getattr(self.config, "gripper_park_deg", 0.0))), math.radians(20.0), 0.05)
++                    else:
++                        motor.disable()
++            except Exception:
++                logger.exception("Motor %s cleanup failed", name)
++            finally:
++                try: motor.close()
++                except Exception: logger.exception("Motor %s transport close failed", name)
+         self._safe_zero_incomplete = False
+-        
+-        self.bus.close()
+-        self.bus = None
+-
++        try:
++            self.bus.close()
++        finally:
++            self.bus = None
++            self._connection_ready = False
+         for cam in self.cameras.values():
+-            cam.disconnect()
++            if cam.is_connected:
++                try: cam.disconnect()
++                except Exception: logger.exception("Camera disconnect failed")
+ 
+         self._emergency_disable_requested = False
+         logger.info(f"{self} disconnected.")
+--- a/lerobot_robot_seeed_b601/bi_seeed_b601_dm_follower.py
++++ b/lerobot_robot_seeed_b601/bi_seeed_b601_dm_follower.py
+@@ -73,6 +73,9 @@
+             self.left_arm.connect(calibrate)
+             self.right_arm.connect(calibrate)
+         except Exception:
++            # A failed startup must not trigger motion on either follower.
++            self.left_arm._skip_safe_zero_on_disconnect = True
++            self.right_arm._skip_safe_zero_on_disconnect = True
+             try:
+                 self.disconnect()
+             except Exception:
+--- a/lerobot_robot_seeed_b601/mode_safety.py
++++ b/lerobot_robot_seeed_b601/mode_safety.py
+@@ -0,0 +1,23 @@
++"""Bounded DM mode verification; a missing write ACK is never proof of success."""
++import time
++
++
++def ensure_mode_checked(motor, mode, *, attempts=3, sleep=time.sleep):
++    last=None
++    for attempt in range(attempts):
++        try:
++            motor.ensure_mode(mode, timeout_ms=1500)
++            return
++        except Exception as error:
++            last=error
++            # Some DM bridges lose the register-write ACK while the register
++            # itself changes. Only accept a fresh, matching RID10 response.
++            if 'register 10 write ack not received' not in str(error).lower():
++                raise
++            try:
++                if motor.get_register_u32(10, timeout_ms=1500) == int(mode):
++                    return
++            except Exception as read_error:
++                last=read_error
++            if attempt+1<attempts:sleep(.08*(attempt+1))
++    raise RuntimeError(f'控制模式无法通过寄存器 10 实时回读确认；未允许使能：{last}') from last

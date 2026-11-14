@@ -1,0 +1,9 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"><title>连接工作区</title><link rel="stylesheet" href="launcher.css"></head><body><main>
+<header><img src="../build/icon.png" alt="reBot"><div><h1>reBot 机械臂控制台</h1><p>桌面工作区 <span id="version"></span></p></div></header>
+<section id="status" role="status" aria-live="polite"><i></i><div><strong id="statusTitle">正在连接…</strong><p id="statusDetail">正在读取已保存的连接设置。</p></div></section>
+<form id="connectionForm"><div class="field"><label id="serverLabel" for="serverUrl">控制服务地址</label><input id="serverUrl" type="url" required placeholder="http://127.0.0.1:8000"><small id="serverHelp">本机运行使用 http://127.0.0.1:8000；也可填写局域网内另一台控制主机的地址。</small></div>
+<label class="check" id="autoStartField"><input id="autoStart" type="checkbox">服务未启动时，自动启动本机控制后端</label>
+<details id="localSettings"><summary>本机启动设置</summary><div class="field"><label id="projectLabel" for="projectPath">reBot 项目目录</label><div class="path"><input id="projectPath"><button id="pickProject" type="button">选择</button></div></div><div class="field"><label id="pythonLabel" for="pythonPath">LeRobot 环境 Python</label><div class="path"><input id="pythonPath"><button id="pickPython" type="button">选择</button></div></div></details>
+<div class="actions"><span id="saved">连接设置会自动保存</span><button id="connect" class="primary" type="submit">连接工作区</button></div></form>
+<footer id="platformNote">本机后端直接访问本机串口、相机和机械臂。</footer>
+</main><script src="launcher.js"></script></body></html>

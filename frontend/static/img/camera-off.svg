@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="480" viewBox="0 0 640 480">
+  <rect width="640" height="480" fill="#15191f"/>
+  <g fill="none" stroke="#2a3038" stroke-width="1">
+    <path d="M0 120H640M0 240H640M0 360H640M160 0V480M320 0V480M480 0V480"/>
+  </g>
+  <g stroke="#5b6472" stroke-width="2" fill="none" stroke-linecap="round">
+    <rect x="252" y="196" width="112" height="76" rx="8"/>
+    <path d="M280 196l8-14h40l8 14"/>
+    <circle cx="308" cy="234" r="20"/>
+  </g>
+  <text x="320" y="308" text-anchor="middle" fill="#a8b0bc" font-family="sans-serif" font-size="17">摄像头画面不可用</text>
+  <text x="320" y="334" text-anchor="middle" fill="#6f7886" font-family="sans-serif" font-size="13">请查看右侧错误提示，检查设备编号与权限</text>
+</svg>

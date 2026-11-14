@@ -1,0 +1,86 @@
+{
+  "name": "rebot-console",
+  "version": "3.4.1",
+  "description": "reBot 机器人桌面控制台；Windows 与 Linux 本机控制",
+  "main": "src/main.cjs",
+  "author": "reBot Project",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "build:deb": "electron-builder --linux deb --x64 --publish never",
+    "build:win": "electron-builder --win portable --x64 --publish never",
+    "build:win-zip": "electron-builder --win zip --x64 --publish never",
+    "test": "node --test test/*.test.cjs",
+    "build:win-installer": "electron-builder --win nsis --x64 --publish never"
+  },
+  "devDependencies": {
+    "@resvg/resvg-js": "2.6.2",
+    "electron": "45.3.1",
+    "electron-builder": "26.18.0"
+  },
+  "build": {
+    "appId": "local.rebot.console",
+    "productName": "reBot Console",
+    "asar": true,
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**",
+      "renderer/**",
+      "build/icon.png",
+      "package.json"
+    ],
+    "linux": {
+      "target": [
+        "deb"
+      ],
+      "category": "Development",
+      "icon": "build/icon.png",
+      "executableName": "rebot-console",
+      "maintainer": "reBot Project <rebot@localhost>",
+      "desktop": {
+        "entry": {
+          "Name": "reBot 机械臂控制台",
+          "Comment": "双臂遥操作、数据采集与实时监视",
+          "Terminal": "false"
+        }
+      },
+      "syncDesktopName": true
+    },
+    "deb": {
+      "depends": [
+        "libgtk-3-0",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libgbm1",
+        "libasound2 | libasound2t64",
+        "libnotify4",
+        "libsecret-1-0",
+        "libatspi2.0-0"
+      ]
+    },
+    "win": {
+      "target": [
+        "portable"
+      ],
+      "signAndEditExecutable": true,
+      "artifactName": "reBot-Console-${version}-Windows-${arch}.${ext}",
+      "signExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "reBot 机械臂控制台"
+    }
+  },
+  "homepage": "http://127.0.0.1:8000",
+  "desktopName": "rebot-console"
+}

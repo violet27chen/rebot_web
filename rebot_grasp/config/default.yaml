@@ -1,0 +1,60 @@
+camera:
+  type: orbbec_gemini2
+  serial: null
+  color_width: 1280
+  color_height: 720
+  depth_width: 1280
+  depth_height: 720
+  fps: 30
+
+calibration:
+  aruco:
+    marker_length_m: 0.1
+    dict_id: 0
+    target_marker_id: 0
+  hand_eye_method: TSAI
+
+detection:
+  conf_threshold: 0.5
+  iou_threshold: 0.45
+
+robot:
+  repo_root: null
+  config_path: null
+  urdf_path: null
+  pose_convention: xyz_euler_rad
+  ready_pose:
+    x: 0.3
+    y: 0.0
+    z: 0.3
+    roll: 0.0
+    pitch: 0.7
+    duration: 3.0
+
+yolo:
+  model_name: "yolo11n-seg.engine"
+  device: "auto"
+  use_world: false
+  custom_classes: []
+
+graspnet:
+  checkpoint: "checkpoint-rs.tar"
+
+grasp_pipeline:
+  infer_every_live: 3
+  grasp:
+    depth_quantile: 0.6
+    pregrasp_offset_m: 0.080
+    # grasp_forward_offset_m 等 18 个补偿字段故意不在 YAML 里写死：
+    # 否则 YAML 显式 0.000 会让 /compensation 持久化的值被覆盖。
+    # 启动时按 CLI > config/compensation.json > 0.0 优先级加载。
+  place:
+    enabled: true
+    base_joint: joint1
+    base_delta_deg: 90.0
+    base_direction: auto
+    base_rotate_duration: 2.5
+    base_safety_margin_deg: 5.0
+    stow_before_base_rotate: true
+    stow_duration: 2.5
+    return_home: false

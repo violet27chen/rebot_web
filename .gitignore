@@ -1,0 +1,16 @@
+# 含密钥的本机配置，不上传
+backend/config.json
+.venv*/
+__pycache__/
+*.pyc
+.tmp*
+.workbuddy/
+.vscode/
+Log/
+outputs/
+yolo_datasets/
+node_modules/
+# 第三方 SDK（体积大），请单独获取
+rebot_grasp/sdk/
+*.pt
+*.safetensors

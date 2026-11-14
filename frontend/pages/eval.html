@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>策略评估 · 机械臂控制台</title>
+  <link rel="icon" href="/static/img/logo.svg">
+  <link rel="stylesheet" href="/static/css/style.css?v=3.4.1-20261114-2">
+</head>
+<body>
+  <div id="shell"></div>
+  <div id="page" class="page">
+    <div id="evalAlert" class="alert"></div>
+
+    <div class="card">
+      <div class="card-h"><h2>策略评估</h2><span class="sub">lerobot-record + --policy.path · 真机跑策略</span></div>
+      <form id="evalForm">
+        <div class="field"><label>策略模型路径</label><select name="policy_path"></select></div>
+        <div class="field" style="margin-top:10px"><label>评估数据集 repo_id</label><input name="repo_id"></div>
+        <div class="field" style="margin-top:10px"><label>任务描述</label><input name="single_task"></div>
+        <div class="row" style="margin-top:10px">
+          <div class="field narrow"><label>剧集数</label><input name="num_episodes" type="number" value="1"></div>
+          <div class="field narrow"><label>单集时长 (s)</label><input name="episode_time_s" type="number" value="30"></div>
+          <div class="field narrow"><label>重置时长 (s)</label><input name="reset_time_s" type="number" value="10"></div>
+        </div>
+        <label class="check" style="margin-top:12px">
+          <input type="checkbox" name="auto_home" checked> 结束时自动回零并卸力（建议；确认回零路径上没有设备）
+        </label>
+        <div class="btn-row" style="margin-top:14px">
+          <button class="btn subtle" type="submit">保存参数</button>
+          <button class="btn subtle" type="button" id="btnReloadCkpt">刷新检查点</button>
+          <button class="btn subtle" type="button" id="btnNewEvalName">生成数据集名</button>
+          <button class="btn primary" type="button" id="btnEval">开始评估</button>
+          <button class="btn danger" type="button" id="btnEvalStop">急停</button>
+        </div>
+        <div class="note" style="margin-top:12px">
+          需要先连接主从臂与相机；检查点从「模型产出」里选。评估会以真机运行策略，注意周围环境。
+        </div>
+      </form>
+    </div>
+
+    <section class="card sorting-panel" id="sortingConsole" aria-labelledby="sortingTitle">
+      <div class="card-h"><div><h2 id="sortingTitle">包裹定位与技能执行</h2><p class="hint">固定俯视 RGB-D → YOLO 类别与高度 → 规则推拢到训练区域 → 对应的独立 ACT 技能</p></div><span class="badge" id="sortingState">读取配置…</span></div>
+      <div class="alert" id="sortingAlert" role="alert"></div>
+      <p class="note" id="sortingRequirements">正在核对标定和技能配置…</p>
+      <div id="sortingConfig"><div class="row"><div class="field"><label for="sortingYolo">包裹 YOLO 检测模型（本地 .pt）</label><input id="sortingYolo" placeholder="/绝对路径/parcel_best.pt"></div><div class="field"><label for="sortingDevice">推理设备</label><select id="sortingDevice"><option value="cuda">CUDA</option><option value="cpu">CPU</option></select></div><div class="field"><label for="sortingConfidence">检测置信度</label><input id="sortingConfidence" type="number" min="0.1" max="0.99" step="0.05" value="0.6"></div></div>
+      <details class="advanced-settings"><summary>独立 ACT 技能登记</summary><p class="hint">每个 YOLO 类别唯一对应一个已独立训练的 14 维 ACT；需声明真实训练区域、实测起始姿态和训练相机映射。变更标定后须重新核对，不能只改版本号绕过适用范围。</p><div class="btn-row"><button class="btn subtle" id="sortingTemplate" type="button">查看登记模板</button><span class="hint" id="sortingCalibId"></span></div><div class="field"><label for="sortingSkills">技能清单（JSON 数组，自动保存）</label><textarea id="sortingSkills" rows="12" spellcheck="false">[]</textarea></div></details>
+      <details class="advanced-settings"><summary>控制边界 · 未填写时禁止执行</summary><p class="hint">顺序为左臂 1–7、右臂 1–7；使用原始电机弧度和 Nm。力矩上限须结合电机规格、支撑负载和包裹承载能力确定。</p><div class="row"><div class="field"><label for="sortingTorque">14 个电机力矩上限（JSON 数组，Nm）</label><textarea id="sortingTorque" rows="3" placeholder="填写 14 个经确认的正数"></textarea></div><div class="field"><label for="sortingLimits">14 组原始关节限位（JSON 二维数组，rad）</label><textarea id="sortingLimits" rows="3" placeholder="每项为 [下限,上限]"></textarea></div></div><div class="row"><div class="field"><label for="sortingVelocity">最大关节速度（rad/s）</label><input id="sortingVelocity" type="number" min="0.01" max="0.5" step="0.01" value="0.25"></div><div class="field"><label for="sortingClearance">接近净空（米）</label><input id="sortingClearance" type="number" min="0.05" max="0.3" step="0.01" value="0.1"></div><div class="field"><label for="sortingPush">单次推拢上限（米）</label><input id="sortingPush" type="number" min="0.01" max="0.2" step="0.01" value="0.12"></div></div></details></div>
+      <div class="btn-row"><button class="btn primary" id="sortingDetect" type="button">检测包裹与高度</button><button class="btn" id="sortingPlan" type="button" disabled>预演所选目标</button><button class="btn primary" id="sortingExecute" type="button" disabled>确认并执行一次</button><button class="btn danger" id="sortingStop" type="button">停止当前任务</button></div>
+      <p class="hint" id="sortingProgress" aria-live="polite">检测与预演不驱动电机；执行需要二次确认。完成后从顶部收工归零并失能。</p>
+      <div class="rgbd-views" id="sortingPreview" hidden><figure><figcaption>检测画面（冻结帧）</figcaption><canvas id="sortingRgb" aria-label="包裹检测结果"></canvas></figure><figure><figcaption>对应深度预览</figcaption><img id="sortingDepth" alt="对应时刻深度画面"></figure></div>
+      <div class="table-wrap"><table><thead><tr><th>选择 / 类别</th><th>位置 X / Y / Z（米）</th><th>高度</th><th>有效深度点</th><th>技能 / 原因</th></tr></thead><tbody id="sortingTargets"><tr><td colspan="5">尚未检测</td></tr></tbody></table></div>
+      <pre id="sortingPlanDetails" class="command-preview" hidden></pre>
+      <dialog id="sortingTemplateDialog" class="camera-dialog"><form method="dialog"><div class="card-h"><h2>ACT 技能登记模板</h2><button class="btn subtle" aria-label="关闭模板">×</button></div><p class="hint">以下 null 项必须替换为真实数据；此模板不会自动应用。</p><pre id="sortingTemplateText" class="command-preview"></pre><button class="btn">关闭</button></form></dialog>
+    </section>
+    <details class="card advanced-settings"><summary>已保存配置的评估命令</summary><pre class="command-preview" id="workflowCommand">正在生成…</pre></details>
+    <div class="card">
+      <div class="card-h"><h2>执行日志</h2><span class="sub"><label class="check"><input type="checkbox" id="logAuto" checked> 自动滚动</label></span></div>
+      <div class="log" id="logPanel"></div>
+    </div>
+  </div>
+  <script src="/static/js/common.js?v=3.4.1-20261114-2"></script>
+  <script src="/static/js/autosave.js?v=3.4.1-20261114-2"></script>
+  <script src="/static/js/sorting-console.js?v=3.5.0-20261114-3"></script>
+  <script src="/static/js/eval.js?v=3.4.1-20261114-2"></script>
+</body>
+</html>
