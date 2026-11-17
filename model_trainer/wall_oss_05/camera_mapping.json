@@ -1,0 +1,5 @@
+{
+  "observation.images.left_深度相机": "face_view",
+  "observation.images.left_左": "left_wrist_view",
+  "observation.images.left_右": "right_wrist_view"
+}

@@ -69,10 +69,13 @@
     placeholder.querySelector('p').textContent = '正在等待首帧…';
     t.querySelector('[data-toggle]').textContent = '暂停预览';
     if(shared){
+      if(shared.ensureSource)shared.ensureSource(c.index_or_path);
       img.hidden=true;var canvas=t.querySelector('canvas');if(!canvas){canvas=document.createElement('canvas');canvas.style.cssText='position:absolute;inset:0;display:block;width:100%;height:100%;object-fit:fill';img.after(canvas);}canvas.hidden=false;
+      var lastEnsure=Date.now();
       function draw(){if(!running.has(c._id))return;var source=shared.getImage(c.index_or_path);
         if(shared.paused()){placeholder.hidden=false;placeholder.querySelector('p').textContent='设备已断开，可在常驻监视区恢复';}
         else if(source&&source.naturalWidth&&source.naturalHeight&&source.getAttribute('src')){if(canvas.width!==source.naturalWidth||canvas.height!==source.naturalHeight){canvas.width=source.naturalWidth;canvas.height=source.naturalHeight;}if(previewBox)previewBox.style.aspectRatio=source.naturalWidth+' / '+source.naturalHeight;canvas.getContext('2d').drawImage(source,0,0,canvas.width,canvas.height);placeholder.hidden=true;t.querySelector('[data-state]').textContent='共享实时画面';t.querySelector('[data-state]').className='badge ok';}
+        else {placeholder.hidden=false;var detail=shared.sourceState?shared.sourceState(c.index_or_path):null;placeholder.querySelector('p').textContent=detail?detail.message:'正在等待共享相机首帧…';if(Date.now()-lastEnsure>1000){lastEnsure=Date.now();if(shared.ensureSource)shared.ensureSource(c.index_or_path);}}
         mirrorFrames.set(c._id,requestAnimationFrame(draw));
       }draw();return;
     }
@@ -173,7 +176,14 @@
   A.el('btnDiscover').onclick = function () { A.action(function () { return discover(true); }, '#camAlert'); };
   A.el('btnAddCam').onclick = function () { openEditor(); };
   A.el('btnSaveCam').onclick = function(){cameraBinding.flush().catch(function(){});};
-  A.el('btnPreviewAll').onclick = function () { cameras.forEach(function(c){start(c);}); };
+  A.el('btnPreviewAll').onclick = function () { A.action(async function(){
+    var button=A.el('btnPreviewAll');button.disabled=true;button.textContent='正在启动全部预览…';
+    try{
+      if(shared&&shared.paused()){await A.api.post('/api/devices/resume',{});shared.pause(false);}
+      cameras.forEach(function(c){start(c);});
+      if(!cameras.length)A.setAlert('#camAlert','尚未配置相机，请先添加已连接的视频设备','info');
+    }finally{button.disabled=false;button.textContent='全部预览';}
+  },'#camAlert'); };
   A.el('btnPauseAll').onclick = function () { cameras.forEach(function(c){stop(c);}); };
   function setResolution(c, w, h) {
     if (!c || !(w >= 16 && h >= 16) || (Number(c.width) === w && Number(c.height) === h)) return;
@@ -217,19 +227,6 @@
       await A.api.post('/api/cameras/scan', {backend: parts[1]}); A.toast('设备扫描完成，画面继续运行', 'ok');
     }, '#camAlert'); });
   });
-  A.click('btnOrbUdev', function () { A.action(async function () {
-    var pwd = A.el('orbPwd').value; if (!pwd) throw new Error('请输入权限安装密码');
-    try { var r = await A.api.post('/api/camera/orbbec/udev', {password: pwd}, 40000); A.el('orbHint').textContent = r.note; }
-    finally { A.el('orbPwd').value = ''; }
-  }, '#camAlert'); });
-  A.click('btnOrbSnap', function () { A.action(async function () {
-    var b = A.el('btnOrbSnap'); b.disabled = true;
-    try {
-      var r = await fetch('/api/camera/orbbec/snapshot'); if (!r.ok) { var d = await r.json(); throw new Error(d.error || 'SDK 抓图失败'); }
-      var img = A.el('orbImg'); if (img.dataset.url) URL.revokeObjectURL(img.dataset.url);
-      img.dataset.url = URL.createObjectURL(await r.blob()); img.src = img.dataset.url; img.hidden = false;
-    } finally { b.disabled = false; }
-  }, '#camAlert'); });
   function clean(c){var out=Object.assign({},c);delete out._id;return out;}
   function profile(c){return JSON.stringify([key(c.index_or_path),c.type,c.width,c.height,c.fps,c.fourcc]);}
   function refreshCards(){

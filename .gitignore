@@ -1,16 +1,59 @@
 # 含密钥的本机配置，不上传
 backend/config.json
-.venv*/
-__pycache__/
-*.pyc
+backend/config.local.json
+sorting.json
+
+# 构建与打包输出产物
+dist/
+build/
+*.egg-info/
+node_modules/
+7outputs/
+outputs/
+yolo_datasets/
+
+# 压缩包与系统诊断包
+*.zip
+*.tar
+*.tar.*
+*.tgz
+*.rar
+*.7z
+
+# 日志与临时目录
+Log/
+logs/
+*.log
 .tmp*
 .workbuddy/
 .vscode/
-Log/
-outputs/
-yolo_datasets/
-node_modules/
+.idea/
+.pytest_cache/
+
+# Python 缓存与虚拟环境
+.venv*/
+venv*/
+env*/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 模型权重大文件（单独分发）
+*.pt
+*.pth
+*.safetensors
+*.bin
+*.onnx
+*.engine
+*.ckpt
+*.h5
+
 # 第三方 SDK（体积大），请单独获取
 rebot_grasp/sdk/
-*.pt
-*.safetensors
+
+# 系统临时文件
+.DS_Store
+Thumbs.db
+*~
+*.swp

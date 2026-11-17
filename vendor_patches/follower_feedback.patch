@@ -1,0 +1,48 @@
+--- a/lerobot_robot_seeed_b601/seeed_b601_follower.py
++++ b/lerobot_robot_seeed_b601/seeed_b601_follower.py
+@@ -560,22 +560,17 @@
+         # Request and poll feedback from motorbridge
+         for motor in self.motors.values():
+             motor.request_feedback()
+-        try:
+-            self.bus.poll_feedback_once()
+-        except:
+-            logger.warning(f"can bus poll feedback failed.")
+-
++        # A missing sample is not a real zero; do not record or control from fabricated data.
++        self.bus.poll_feedback_once()
+         for motor_name, motor in self.motors.items():
+             state = motor.get_state()
+-            if state is not None:
+-                # motorbridge works natively in radians. Convert to degrees.
+-                obs_dict[f"{motor_name}.pos"] = math.degrees(state.pos)
+-                obs_dict[f"{motor_name}.vel"] = math.degrees(state.vel)
+-                obs_dict[f"{motor_name}.torque"] = state.torq
+-            else:
+-                obs_dict[f"{motor_name}.pos"] = 0.0
+-                obs_dict[f"{motor_name}.vel"] = 0.0
+-                obs_dict[f"{motor_name}.torque"] = 0.0
++            if state is None or not all(math.isfinite(float(v)) for v in
++                                        (state.pos, state.vel, state.torq)):
++                raise RuntimeError(f"{self.config.port} {motor_name}: 从臂反馈缺失或无效，未使用默认零值")
++            # motorbridge works natively in radians. Convert to degrees.
++            obs_dict[f"{motor_name}.pos"] = math.degrees(state.pos)
++            obs_dict[f"{motor_name}.vel"] = math.degrees(state.vel)
++            obs_dict[f"{motor_name}.torque"] = state.torq
+ 
+         # Capture images
+         for cam_key, cam in self.cameras.items():
+@@ -628,10 +623,9 @@
+             present_pos = {}
+             for motor_name, motor in self.motors.items():
+                 state = motor.get_state()
+-                if state is not None:
+-                    present_pos[motor_name] = math.degrees(state.pos)
+-                else:
+-                    present_pos[motor_name] = 0.0
++                if state is None or not math.isfinite(float(state.pos)):
++                    raise RuntimeError(f"{self.config.port} {motor_name}: 无实测角度，无法限制相对位移")
++                present_pos[motor_name] = math.degrees(state.pos)
+             
+             goal_present_pos = {key: (g_pos, present_pos.get(key, g_pos)) for key, g_pos in goal_pos.items()}
+             goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)

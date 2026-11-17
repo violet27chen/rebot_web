@@ -104,7 +104,7 @@
 +            values.append(state.pos)
 +        return np.asarray(values,dtype=float)
 +
-+    def safe_home(self,max_vel=.15,send_freq=50.,settle_thresh=.02,timeout=15.) -> None:
++    def safe_home(self,max_vel=.20,send_freq=50.,settle_thresh=.02,timeout=15.) -> None:
 +        """Measured-pose return with bounded velocity and acceleration.
 +
 +        A timeout/obstruction holds the measured pose; it never sends a final
@@ -114,7 +114,7 @@
 +        if not self._running:return
 +        if not np.isfinite([max_vel,send_freq,settle_thresh,timeout]).all() or not 0<max_vel<=5. or not 10<=send_freq<=100 or not 0<settle_thresh<=.035 or timeout<=0:
 +            raise ValueError('Invalid slow homing limits')
-+        max_vel=min(max_vel,.15)
++        max_vel=min(max_vel,.20)
 +        self._stop_send.set()
 +        if self._send_thread is not None:
 +            self._send_thread.join(timeout=2.)
@@ -223,12 +223,12 @@
 -        # Settle at zero before cutting power.
 -        robot.arm.send_mit(home, vel=np.zeros(n), kp=kp, kd=kd, tau=np.zeros(n))
 -        time.sleep(settle)
-+    def safe_home(self,max_vel=.15,send_freq=50.,settle=.5,timeout=15.) -> None:
++    def safe_home(self,max_vel=.20,send_freq=50.,settle=.5,timeout=15.) -> None:
 +        """Slow current-pose return, preserving gravity feedforward on every step."""
 +        from .homing_profile import trajectory
 +        if self._hold_kp is None:raise RuntimeError('safe_home requires start first')
 +        if not 0<max_vel<=5. or not 10<=send_freq<=100:raise ValueError('Invalid home limits')
-+        max_vel=min(max_vel,.15);robot=self.rebotarm;n=robot.arm.num_joints
++        max_vel=min(max_vel,.20);robot=self.rebotarm;n=robot.arm.num_joints
 +        def measured():
 +            robot.get_state();values=[]
 +            names=list(robot.arm.joint_names)
@@ -277,8 +277,8 @@
 +"""
 +import math
 +
-+HOME_SPEED_RAD_S=.15
-+HOME_ACCEL_RAD_S2=.20
++HOME_SPEED_RAD_S=.20
++HOME_ACCEL_RAD_S2=.25
 +HOME_HZ=50.
 +
 +

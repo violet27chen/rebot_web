@@ -4,7 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>摄像头 · reBot 控制台</title>
   <link rel="icon" type="image/svg+xml" href="/static/img/logo.svg">
-  <link rel="stylesheet" href="/static/css/style.css?v=3.5.4-20261114-22">
+  <link rel="stylesheet" href="/static/css/style.css?v=3.5.16-20261117-04">
 </head>
 <body>
   <div id="shell"></div>
@@ -24,16 +24,12 @@
     </div>
     <div class="camera-workspace" id="camGrid" aria-label="相机预览"></div>
     <details class="card advanced-settings">
-      <summary>高级诊断与深度相机</summary>
+      <summary>高级诊断</summary>
       <p class="hint">多路 USB 相机建议使用 MJPG。预览按设备配置采集，网页最多显示 15 帧/秒；采集任务使用保存的帧率。</p>
       <div id="deviceReport" class="hint"></div>
       <h3>LeRobot SDK 扫描</h3>
       <p class="hint">SDK 扫描会暂停网页预览，详细输出可在顶部任务日志查看。</p>
       <div class="btn-row"><button class="btn subtle" id="btnScanOpencv">OpenCV</button><button class="btn subtle" id="btnScanRealsense">RealSense</button><button class="btn subtle" id="btnScanOrbbec">Orbbec</button></div>
-      <h3>Orbbec SDK 抓图</h3>
-      <p class="hint">UVC 彩色画面直接在上方添加相机；深度 SDK 抓图请先暂停该设备预览。</p>
-      <div class="row"><div class="field"><label for="orbPwd">权限安装密码</label><input type="password" id="orbPwd" autocomplete="off"></div><div class="btn-row"><button class="btn subtle" id="btnOrbUdev">安装权限</button><button class="btn" id="btnOrbSnap">SDK 抓图</button></div></div>
-      <div class="hint" id="orbHint"></div><img id="orbImg" hidden style="max-width:100%;border-radius:8px;margin-top:12px" alt="Orbbec SDK 彩色图像">
     </details>
     <dialog class="camera-dialog" id="cameraDialog" aria-labelledby="cameraDialogTitle">
       <form id="cameraForm">
@@ -50,8 +46,8 @@
       </form>
     </dialog>
   </main>
-  <script src="/static/js/common.js?v=3.5.4-20261114-22"></script>
-  <script src="/static/js/autosave.js?v=3.5.4-20261114-22"></script>
-  <script src="/static/js/camera.js?v=3.5.4-20261114-22"></script>
+  <script src="/static/js/common.js?v=3.5.16-20261117-04"></script>
+  <script src="/static/js/autosave.js?v=3.5.16-20261117-04"></script>
+  <script src="/static/js/camera.js?v=3.5.16-20261117-04"></script>
 </body>
 </html>

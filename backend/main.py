@@ -1,28 +1,59 @@
 # -*- coding: utf-8 -*-
 """
-跨品牌机械臂「一键操控与训练」平台 —— FastAPI 后端（真机版 / 无模拟数据）
-======================================================================
-Leader  : 幻尔 Star Arm 102-LD  -> rebot_arm_102_leader
-Follower: Seeed B601-DM        -> seeed_b601_dm_follower (--robot.can_adapter=damiao)
+跨品牌机械臂「一键操控与训练」平台 —— FastAPI 核心后端服务 (Production Real-Robot Server)
+========================================================================================
 
-命令来源: https://wiki.seeedstudio.com/cn/rebot_arm_b601_dm_lerobot/
-说明    : 官方文档只提供 lerobot-* CLI，没有 get_action / send_action 的 Python API，
-          因此硬件操作一律用 subprocess.Popen 执行官方命令，不臆造 Python 接口。
+【系统架构定位与设计哲学】
+本系统是专为桌面轻型六自由度双臂/单臂协作机器人打造的端到端具身智能（Embodied AI）
+软硬件一体化控制与训练平台。
+核心硬件配置：
+- 示教主臂 (Leader)   : 幻尔 Star Arm 102-LD (总线舵机) -> rebot_arm_102_leader
+- 执行从臂 (Follower) : Seeed B601-DM (达妙电机)       -> seeed_b601_dm_follower (--robot.can_adapter=damiao)
+- 视觉系统 (Cameras)  : 支持多路工业 UVC RGB 相机与奥比中光 (Orbbec) 结构光深度相机
 
-本版本约定：
-  * 没有任何 Mock / 假数据。串口、数据集、检查点、摄像头、Loss 全部来自真实系统。
-  * 任何一步连不上 / 缺依赖 / 缺权限，都返回统一错误信封 {ok:false,error:"..."}，
-    由前端优雅提示，不静默伪造成功。
-  * 训练引擎可插拔：LeRobot / YOLO / OpenCV，选择后分发到对应真实训练代码。
+【工业级安全规范与设计原则】
+1. 绝对无 Mock / 零模拟数据 (No Mock Policy)：
+   串口连接、电机力矩反馈、数据集存储、模型权重、相机帧流与训练 Loss 全部直接读取自底层真实系统；
+   任何通信中断、缺少依赖或无权限错误，一律抛出结构化错误信封 `{ok: false, error: "..."}`，绝不静默假装成功。
+2. 守护防掉臂与力矩维持 (Anti-Drop Hold Mechanism)：
+   从臂电机在各任务结束后一律设置长效 CAN 超时（120s~600s），保持当前静态悬停姿态，
+   断开时严禁自动回零下压，防止重力坠落砸伤桌面物料或损坏减速机。
+3. 进程级隔离架构 (Process Isolation)：
+   - 视觉采集独立子进程 (`rebot-vision` via `vision_broker`)：独占物理 V4L2 句柄，提供 Socket RPC；
+   - 运单扫码/OCR 子进程 (`rebot-waybill` via `waybill_process`)：绑定单核与低优先级，隔离 C 库崩溃；
+   - 异步 ACT 推理子进程 (`rebot-act-inference`)：隔离 PyTorch/CUDA 上下文，通过共享内存零拷贝交换数据；
+   - 安全收工与零点标定子进程 (`shutdown_worker`, `zero_adjust_worker`)：独立执行物理分阶段归零。
+4. 训练与模型三模态可插拔：
+   - LeRobot：行为克隆 (ACT)、扩散策略 (Diffusion Policy)、SmolVLA 机械臂端到端控制；
+   - Ultralytics YOLO：目标定位与表面缺陷检测；
+   - OpenCV Classical：超轻量 SVM/KNN 边缘端分类。
 
-启动: python start.py            (会先提示 sudo 密码授权串口，再启动网页服务)
-      python start.py --host 0.0.0.0
+【系统 16 大功能章节划分】
+- 第 0 节: 系统常量、基础路径、清华源与镜像加速配置；
+- 第 1 节: 统一 ApiError 异常体系与结构化 JSON 响应信封；
+- 第 2 节: 配置管理（config.json 读写、原子持久化与安全脱敏）；
+- 第 3 节: 统一异步日志总线 (LogHub)，实现子进程终端输出向 WebSocket 实时广播；
+- 第 4 节: 全局单例运行状态机 (State)，集中管控当前任务（录制/训练/遥操作）与急停标志；
+- 第 5 节: 真实 Conda 环境探测与环境路径规范化；
+- 第 5b节: LeRobot 官方驱动安装探测与自研插件动态扫描；
+- 第 6 节: Linux 串口节点枚举与 sudo 权限安全提权链；
+- 第 7 节: 子进程流式执行工具与进程树终止；
+- 第 8 节: LeRobot CLI 命令参数动态构造器；
+- 第 9 节: 一键环境安装命令链（Conda/Pip/清华源/Git-Proxy）；
+- 第 10节: 多引擎训练后端注册表 (TRAIN_BACKENDS)；
+- 第 11节: 任务启动器（start_job、stop_job 与互斥保护 _guard）；
+- 第 12节: 本地文件系统、数据集管理与视频帧流提供；
+- 第 13节: FastAPI 应用入口、全局中间件、HTTP 路由与 WebSocket 端点；
+- 第 14节: 视觉引导物料抓取（FK/IK 预演与真实执行）；
+- 第 15节: 视觉大语言模型 (VLM) 智能识别与自动标注支持；
+- 第 16节: 快递面单条形码/二维码与 OCR 实时扫描检测。
 """
 from __future__ import annotations
 
 import asyncio
 import base64
 import glob
+import copy
 import io
 import json
 import math
@@ -56,9 +87,13 @@ from backend.monitor_geometry import resolve_monitor_geometry
 from backend.device_release import device_paths, kill_device_owners
 from backend.vision_process import VisionProcess
 from backend.telemetry import Telemetry
+from backend.waybill_sources import select_cameras
+from backend.waybill_process import WaybillProcess, ScanBusy, ScanError
 from backend.training import training_mode, prepare_finetune, read_policy
 from backend.training_metrics import numeric_step, parse_metric
 from backend.model_evaluation import prepare_evaluation
+from backend.recording_settings import recording_cameras, recording_options
+from backend.recording_progress import RecordingProgress
 from backend.raw_frames import frame_packet
 from backend.camera_manager import CameraManager, CameraError, source_key, list_devices, validate_configs
 
@@ -211,6 +246,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "dataset": {"repo_id": "seeed_rebot_b601_dm/test", "num_episodes": 5, "auto_home": True,
                 "single_task": "Grab the black cube", "push_to_hub": False,
                 "episode_time_s": 30, "reset_time_s": 30, "resume": False,
+                "video_resolution": "640x360", "vcodec": "h264", "video_encoding_batch_size": 1,
                 "display_data": True},
     "hf": {"endpoint": "", "auto": True},
     "train": {"backend": "lerobot",
@@ -232,6 +268,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
              "single_task": "Put lego brick into the transparent box",
              "num_episodes": 1, "episode_time_s": 30, "reset_time_s": 10,
              "continuous_sort": True, "idle_stop_s": 8, "max_sort_time_s": 600,
+             "async_inference": True, "async_chunk_size": 0, "async_prefetch_ratio": 0.6,
+             "async_max_age_s": 1.5, "async_wait_timeout_s": 2.0, "async_max_step_deg": 2.0,
+             "flow_matching_steps": 0,
              "auto_home": True},
     "viz": {"repo_id": "seeed_rebot_b601_dm/test", "episode_index": 0,
             "display_compressed_images": False},
@@ -493,6 +532,16 @@ def save_config(patch: Optional[dict]) -> dict[str, Any]:
 # 3. 日志总线（子线程 -> asyncio -> WebSocket，线程安全）
 # ==================================================================
 class LogHub:
+    """
+    系统统一日志总线与事件广播器。
+
+    【核心特性】
+    1. 跨线程安全投递：后台子线程通过 `loop.call_soon_threadsafe` 将终端输出、
+       Loss 指标和状态变更事件异步安全推送到 asyncio.Queue 中；
+    2. 历史回溯缓冲区：维护固定长度（默认 3000 条）的双端队列，供前端刷新页面后快速恢复历史日志；
+    3. 消息分类路由：支持 log（普通/错误终端日志）、state（作业生命周期状态变更）、
+       loss（训练数值指标推送）三类结构化事件。
+    """
     def __init__(self, maxlen: int = 3000) -> None:
         self._subs: set[asyncio.Queue] = set()
         self._lock = threading.Lock()
@@ -501,12 +550,14 @@ class LogHub:
 
     @staticmethod
     def _safe_put(q: asyncio.Queue, ev: dict) -> None:
+        """非阻塞向单个订阅者队列推送事件，队列满时丢弃，防止内存溢出。"""
         try:
             q.put_nowait(ev)
         except Exception:  # noqa: BLE001
             pass
 
     def publish(self, event: dict) -> None:
+        """向所有已连接的 WebSocket 客户端广播事件。"""
         event.setdefault("ts", round(time.time(), 3))
         with self._lock:
             self.history.append(event)
@@ -522,28 +573,34 @@ class LogHub:
             self._safe_put(q, event)
 
     def log(self, line: str, level: str = "info") -> None:
+        """格式化单行日志，自动正则识别包含 error/failed/permission denied 等关键词标记为错误级别。"""
         lvl = "error" if re.search(r"error|traceback|failed|no such|not found|permission denied",
                                    str(line), re.I) else level
         self.publish({"type": "log", "level": lvl, "line": str(line).rstrip()})
 
     def state(self, **kw: Any) -> None:
+        """广播全局任务状态机变更事件。"""
         self.publish({"type": "state", **kw})
 
     def loss(self, step: int, value: float, **metadata) -> None:
+        """广播训练 Loss 指标点，供前端绘制动态学习曲线。"""
         if math.isfinite(value):
             self.publish({"type": "loss", "step": step, "value": round(value, 6), **metadata})
 
     def subscribe(self) -> asyncio.Queue:
+        """注册一个新的 WebSocket 客户端事件队列。"""
         q: asyncio.Queue = asyncio.Queue(maxsize=2000)
         with self._lock:
             self._subs.add(q)
         return q
 
     def unsubscribe(self, q: asyncio.Queue) -> None:
+        """注销断开的 WebSocket 客户端队列。"""
         with self._lock:
             self._subs.discard(q)
 
     def snapshot(self, n: int = 300) -> list[dict]:
+        """获取最近 n 条历史事件快照。"""
         with self._lock:
             return list(self.history)[-n:]
 
@@ -556,6 +613,31 @@ HUB = LogHub()
 # ==================================================================
 @dataclass
 class Job:
+    """
+    单个后台运行作业（如 Teleop 遥操作、Record 数据录制、Train 训练、Eval 评估）的数据模型。
+
+    Attributes:
+        name (str): 作业显示名称。
+        kind (str): 作业类别枚举 ('teleop' | 'record' | 'train' | 'eval' | 'install')。
+        command (list[str]): 实际底层启动的命令行指令列表。
+        display (str): 前端展示给用户的脱敏友好命令行。
+        proc (subprocess.Popen or None): 当前正在运行的底层系统子进程。
+        thread (threading.Thread or None): 负责异步消费 stdout/stderr 的监控线程。
+        started_at (float): 作业启动的 Unix 时间戳。
+        job_id (str): 全局唯一的 24 位随机任务十六进制 ID。
+        prompt_id (int): 等待用户确认交互的自增流水号。
+        stopping (bool): 任务是否已处于停止收尾流程中。
+        result (dict or None): 任务执行完毕后保存的结构化执行结果。
+        finish_lock (threading.Lock): 保证收尾回调仅触发一次的互斥锁。
+        finished (threading.Event): 标记该任务已彻底结束的事件。
+        exit_code (int or None): 子进程退出码 (0=正常退出, 负数=被信号终止)。
+        stdin_data (str or None): 启动时一次性灌入的初始标准输入内容。
+        stdin_live (bool): 是否保持标准输入管道持续打开（供用户通过 Web 页面交互输入回车）。
+        record_control_ready (bool): 录制控制管道是否已完成就绪握手。
+        awaiting_input (bool): 标志当前子进程是否正在通过 input() 等待用户交互。
+        awaiting_prompt (str): 当前等待用户输入的提示说明。
+        input_lock (threading.Lock): 保护标准输入写入的线程锁。
+    """
     name: str
     kind: str
     command: list[str]
@@ -567,6 +649,9 @@ class Job:
     prompt_id: int = 0
     stopping: bool = False
     result: Optional[dict] = None
+    inference_mode: Optional[str] = None
+    policy_type: Optional[str] = None
+    inference_details: Optional[dict] = None
     finish_lock: threading.Lock = field(default_factory=threading.Lock)
     finished: threading.Event = field(default_factory=threading.Event)
     exit_code: int | None = None
@@ -574,6 +659,7 @@ class Job:
     # 子进程 stdin 保持打开的管道：lerobot-calibrate 等命令会用 input() 等回车，
     # 必须能由网页 /api/job/input 写入，否则会立刻 EOFError。
     stdin_live: bool = False
+    record_control_ready: bool = False
     awaiting_input: bool = False
     awaiting_prompt: str = ""
     input_lock: threading.Lock = field(default_factory=threading.Lock)
@@ -588,6 +674,7 @@ class Job:
     last_line: str = ""
     last_line_at: float = field(default_factory=time.time)
     progress_stop: threading.Event = field(default_factory=threading.Event)
+    recording: Optional[RecordingProgress] = None
 
 
 class EnvState:
@@ -715,6 +802,12 @@ def conda_cmd(*args: str, conda: str = "") -> list[str]:
     return [str(exe), *args]
 
 
+def conda_subproc_env() -> dict[str, str]:
+    """Conda 子进程环境：过滤掉外部环境变量 PYTHONPATH / PYTHONHOME，
+    避免外部环境（如 ROS 2 或其他虚拟环境的 Python 3.12 模块）干扰 Miniconda 基础解释器（Python 3.14）。"""
+    return {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")}
+
+
 def _dir_writable(p: Path) -> bool:
     """目录不存在时检查最近的存在祖先；真实可写性仍由 conda 创建时裁决。"""
     cur = p
@@ -736,7 +829,8 @@ def _conda_envs_dirs(conda: str) -> list[str]:
         return []
     try:
         r = subprocess.run(conda_cmd("info", "--json", conda=conda), capture_output=True,
-                           text=True, encoding=SUBPROC_KW_ENCODING, errors="replace", timeout=20)
+                           text=True, encoding=SUBPROC_KW_ENCODING, errors="replace", timeout=20,
+                           env=conda_subproc_env())
         if r.returncode != 0:
             HUB.log(f"[env] conda info 读取失败：{(r.stderr or '').strip()[:200]}", "warn")
             return []
@@ -754,7 +848,8 @@ def conda_envs() -> list[dict]:
         try:
             r = subprocess.run(conda_cmd("env", "list", "--json", conda=conda),
                                capture_output=True, text=True,
-                               encoding=SUBPROC_KW_ENCODING, errors="replace", timeout=20)
+                               encoding=SUBPROC_KW_ENCODING, errors="replace", timeout=20,
+                               env=conda_subproc_env())
             if r.returncode != 0:
                 raise RuntimeError((r.stderr or "").strip() or f"exit {r.returncode}")
             paths += [str(p) for p in json.loads(r.stdout).get("envs", [])]
@@ -1366,6 +1461,9 @@ def _popen(cmd: list[str], stdin_data: Optional[str] = None,
     # 禁止 git 弹出凭据输入框把命令挂死；pip/python 也关闭输出缓冲
     if env_extra:
         env.update({str(k): str(v) for k, v in env_extra.items()})
+    if cmd and "conda" in Path(str(cmd[0])).name.lower():
+        env.pop("PYTHONPATH", None)
+        env.pop("PYTHONHOME", None)
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GCM_INTERACTIVE"] = "never"
     env["PYTHONUNBUFFERED"] = "1"
@@ -1434,6 +1532,8 @@ PROMPT_RE = re.compile(
 
 # 已知失败模式 -> 可执行的下一步。只在退出码非 0 时匹配，不影响正常输出。
 FAIL_HINTS: tuple[tuple[re.Pattern, str], ...] = (
+    (re.compile(r'主臂舵机检测失败|主臂连接失败|Servo not found', re.I),
+     '主臂通信未通过。请检查日志中的主臂串口、未响应 ID、主臂供电及舵机总线接头；串口能打开不代表舵机已在线。'),
     (re.compile(r"gripper zero-detect[^\n]*(?:outside joint limits|no feedback|failed)", re.I),
      "夹爪零点或反馈校验未通过。请在「设备连接与校准」的零点调整中读取实测角度；"
      "只有物理零位错误时，才在托住机械臂、闭合夹爪后确认重新设零。"),
@@ -1492,9 +1592,13 @@ def _job_progress(job: Job) -> dict[str, Any]:
             "running": not job.finished.is_set(),
             "job": job.name,
             "job_id": job.job_id,
+            "started_at": job.started_at,
             "prompt_id": job.prompt_id,
             "stopping": job.stopping,
             "kind": job.kind,
+            "inference_mode": job.inference_mode,
+            "policy_type": job.policy_type,
+            "inference_details": job.inference_details,
             "step": job.step_index,
             "step_total": job.step_total,
             "step_label": job.step_label or ("" if job.step_total else job.name),
@@ -1506,6 +1610,7 @@ def _job_progress(job: Job) -> dict[str, Any]:
             "awaiting_input": job.awaiting_input,
             "prompt": job.awaiting_prompt[-180:],
             "exit_code": job.exit_code,
+            "recording": job.recording.snapshot() if job.recording else None,
         }
 
 
@@ -1528,14 +1633,40 @@ def _progress_beats(job: Job, stop: threading.Event) -> None:
             silent = int(p["silent_for"])
             HUB.log(
                 f"[进度] {step}{p['step_label'] or p['job']} · 已用时 {_fmt_elapsed(p['elapsed'])}"
-                + (f" · {silent}s 无新输出（下载中常见，可点急停终止）" if silent > 12 else "")
+                + (f" · {silent}s 无新输出（{_silence_hint(p)}）" if silent > 12 else "")
                 + f" · 最近输出：{(p['last_line'] or '命令尚未输出')[:90]}",
                 "warn" if silent > 30 else "info")
 
 
+def _silence_hint(progress: dict) -> str:
+    if progress.get('kind') in ('record', 'eval'):
+        if (progress.get('recording') or {}).get('phase') == 'closing':
+            return '收尾尚未完成，请查看数据关闭及机械臂收工日志'
+        return '采集或推理暂无输出，请查看实时画面及任务状态'
+    if progress.get('kind') in ('install', 'setup', 'train', 'train-resume'):
+        return '可能正在下载或计算，请查看任务状态'
+    return '任务尚未结束，请查看最近输出'
+
+
 def _record_line(job: Job, line: str) -> None:
     with STATE.lock:
+        if job.kind == 'eval' and line.startswith('REBOT_INFERENCE_READY '):
+            try:
+                detail = json.loads(line.split(' ', 1)[1])
+                if (isinstance(detail, dict) and detail.get('policy_type') in ('act', 'smolvla')
+                        and 1 <= int(detail['action_chunk_steps']) <= 1000
+                        and 1 <= int(detail['model_chunk_size']) <= 1000):
+                    job.inference_details = {key: detail.get(key) for key in
+                        ('policy_type', 'action_chunk_steps', 'n_action_steps', 'model_chunk_size', 'flow_matching_steps', 'inference_pid')}
+                    publish_progress(job, 'policy-ready')
+            except (ValueError, TypeError, KeyError):
+                pass
+        if line.strip() == 'REBOT_RECORD_CONTROL_READY' and job.kind in ('record', 'eval'):
+            job.record_control_ready = True
         if job.kind == 'zero-adjust' and line.startswith(('REBOT_ZERO_RESULT ','REBOT_ZERO_ERROR ')):
+            try:job.result=json.loads(line.split(' ',1)[1])
+            except ValueError:pass
+        if job.kind == 'motor-settings' and line.startswith(('REBOT_MOTOR_RESULT ','REBOT_MOTOR_ERROR ')):
             try:job.result=json.loads(line.split(' ',1)[1])
             except ValueError:pass
         if job.kind == 'model-eval' and line.startswith('REBOT_MODEL_EVAL_RESULT '):
@@ -1544,6 +1675,8 @@ def _record_line(job: Job, line: str) -> None:
         job.last_line = str(line)[-180:]
         job.last_line_at = time.time()
         job.tail.append(str(line)[-300:])
+        if job.recording and job.recording.feed(line):
+            publish_progress(job, 'recording-phase')
 
 
 def _emit_line(line: str, kind: str, job: Optional[Job] = None) -> None:
@@ -1808,8 +1941,76 @@ def cameras_arg(cameras: list[dict]) -> str:
         except CameraError as exc:raise ApiError(str(exc),400)
         fields=['type: rebot_shared','source: '+json.dumps(str(source)),
                 f"width: {camera.get('width',640)}",f"height: {camera.get('height',480)}",f"fps: {camera.get('fps',30)}"]
+        if camera.get('_resize_to_config'):fields.append('resize_to_config: true')
         parts.append(json.dumps(str(camera.get('name') or 'cam'),ensure_ascii=False)+': { '+', '.join(fields)+' }')
     return '{ '+', '.join(parts)+' }' if parts else ''
+
+
+def eval_action_chunk_steps(settings):
+    try:
+        # Canonical LeRobot parameter; preserve old saved Web configurations.
+        value = float(settings.get('n_action_steps', settings.get('async_chunk_size', 0)))
+        if not math.isfinite(value) or not value.is_integer() or not 0 <= value <= 1000:
+            raise ValueError('out of range')
+    except (TypeError, ValueError) as exc:
+        raise ApiError('n_action_steps必须是0–1000的整数，0沿用模型', 400) from exc
+    if not value:
+        return 0
+    path = Path(str(settings.get('policy_path') or '')).expanduser()
+    if not path.is_absolute():
+        path = ROOT / path
+    try:
+        policy = read_policy(path)
+        horizon = int(policy['chunk_size'])
+        execution = int(policy.get('n_action_steps', horizon))
+        if min(horizon, execution) < 1:
+            raise ValueError('模型动作块长度必须为正数')
+        return min(int(value), horizon)
+    except (ValueError, KeyError, TypeError) as exc:
+        raise ApiError('无法读取Action Chunk模型配置：' + str(exc), 400) from exc
+
+
+def eval_flow_matching_steps(settings):
+    try:
+        value = float(settings.get('flow_matching_steps', 0))
+        if not math.isfinite(value) or not value.is_integer() or not 0 <= value <= 50:
+            raise ValueError('out of range')
+    except (TypeError, ValueError) as exc:
+        raise ApiError('Flow Matching采样次数必须是0–50的整数，0沿用模型', 400) from exc
+    if value:
+        path = Path(str(settings.get('policy_path') or '')).expanduser()
+        if not path.is_absolute():
+            path = ROOT / path
+        try:
+            kind = read_policy(path).get('type')
+        except ValueError as exc:
+            raise ApiError('无法读取Flow Matching模型配置：' + str(exc), 400) from exc
+        if kind != 'smolvla':
+            raise ApiError('Flow Matching采样次数仅适用于SmolVLA；ACT请设0', 400)
+    return int(value)
+
+
+def validate_async_eval(settings):
+    eval_action_chunk_steps(settings)
+    eval_flow_matching_steps(settings)
+    ranges = {'async_prefetch_ratio':(.1,.95),
+              'async_max_age_s':(.1,5), 'async_wait_timeout_s':(.1,10), 'async_max_step_deg':(.1,5)}
+    for key,(low,high) in ranges.items():
+        try:
+            value=float(settings.get(key,DEFAULT_CONFIG['eval'][key]))
+            if not math.isfinite(value) or not low<=value<=high or (key=='async_chunk_size' and not value.is_integer()):
+                raise ValueError('out of range')
+        except (ValueError,TypeError) as exc:
+            raise ApiError(f'异步参数 {key} 必须在 {low}–{high} 范围内',400) from exc
+    path=Path(str(settings.get('policy_path') or '')).expanduser()
+    if not path.is_absolute():path=ROOT/path
+    try:policy=read_policy(path)
+    except ValueError as exc:raise ApiError('异步推理需要有效的本地 ACT / SmolVLA pretrained_model 目录：'+str(exc),400) from exc
+    if policy.get('type') not in ('act', 'smolvla'):raise ApiError('本页异步推理支持 ACT / SmolVLA；当前模型类型不支持',400)
+    if policy.get('temporal_ensemble_coeff') is not None:
+        raise ApiError('该 ACT 检查点启用了模型内部时序集成，请先关闭本页异步选项',400)
+    if (policy.get('rtc_config') or {}).get('enabled'):
+        raise ApiError('该检查点启用了RTC，不能与本页动作块调度器重复叠加',400)
 
 
 def eval_policy_cameras(cfg: dict, policy_path: str) -> list[dict]:
@@ -1882,7 +2083,12 @@ def eval_policy_cameras(cfg: dict, policy_path: str) -> list[dict]:
         used.add(index)
         if bi_prefix and not name.startswith(bi_prefix):
             raise ApiError(f'检查点相机键 {name} 与当前 B601 双臂前缀规则不一致，请使用匹配的机器人模式或数据集重新训练', 400)
-        selected.append({**camera, "name": source_name})
+        feature=(policy_cfg.get('input_features') or {}).get('observation.images.'+name,{})
+        shape=feature.get('shape') or []
+        output={**camera, 'name':source_name}
+        if len(shape)==3 and shape[0]==3 and (camera.get('height'),camera.get('width'))!=tuple(shape[1:]):
+            output.update(height=shape[1],width=shape[2],_resize_to_config=True)
+        selected.append(output)
     return selected
 
 
@@ -2050,16 +2256,22 @@ def build_command(kind: str, cfg: dict, extra: Optional[dict] = None) -> list[st
         return _lerobot("lerobot-find-cameras") + [
             str(e.get("backend") or cfg.get("camera_backend") or "opencv")]
     if kind == "record":
-        record_base = _lerobot("lerobot-record") if bool(ds.get("auto_home", True)) \
+        record_cfg=dict(cfg)
+        try:
+            record_cfg['cameras']=recording_cameras(cfg,LEROBOT_HOME)
+            codec, record_fps = recording_options(cfg,LEROBOT_HOME)
+        except ValueError as exc:raise ApiError(str(exc),400) from exc
+        record_base = _py() + [str(BACKEND_DIR / 'record_entry.py')] if bool(ds.get("auto_home", True)) \
             else _safe_record()
         cmd = record_base + robot_base_args(
-            cfg, with_cameras=True, display=bool(ds.get("display_data", True)))
-        cmd += [f"--dataset.fps={min([int(ds.get('fps') or 30)]+[int(c.get('fps') or 30) for c in cfg.get('cameras',[])])}", f"--dataset.repo_id={ds['repo_id']}",
+            record_cfg, with_cameras=True, display=bool(ds.get("display_data", True)))
+        cmd += ['--play_sounds=false', f"--dataset.fps={record_fps}", f"--dataset.repo_id={ds['repo_id']}",
                 f"--dataset.num_episodes={ds['num_episodes']}",
                 f"--dataset.single_task={ds['single_task']}",
                 f"--dataset.push_to_hub={_fmt(ds.get('push_to_hub', False))}",
                 f"--dataset.episode_time_s={ds['episode_time_s']}",
-                f"--dataset.reset_time_s={ds['reset_time_s']}"]
+                f"--dataset.reset_time_s={ds['reset_time_s']}",f"--dataset.vcodec={codec}",
+                '--dataset.video_encoding_batch_size=1', '--dataset.num_image_writer_threads_per_camera=2']
         if ds.get("resume"):
             cmd.append("--resume=true")
         # 网页可视化已启动时，让录制进程连到常驻的 Rerun 服务，而不是弹本地窗口
@@ -2136,6 +2348,11 @@ def build_command(kind: str, cfg: dict, extra: Optional[dict] = None) -> list[st
         return _lerobot("lerobot-train") + [
             f"--config_path={e.get('config_path') or tr.get('resume_config')}", "--resume=true"]
     if kind == "eval":
+        action_steps = eval_action_chunk_steps(ev)
+        flow_steps = eval_flow_matching_steps(ev)
+        asynchronous = bool(ev.get('async_inference', True))
+        if asynchronous:
+            validate_async_eval(ev)
         # 支持两种模式：
         # 1) 持续分拣模式（continuous_sort=True）：不按 30s 截断，连续分拣直到全部快递弄完（机械臂静止满 idle_stop_s 秒自动停机）；
         # 2) 固定剧集评估模式（continuous_sort=False）：按设定的 num_episodes × episode_time_s 执行。
@@ -2146,7 +2363,7 @@ def build_command(kind: str, cfg: dict, extra: Optional[dict] = None) -> list[st
             ep_time = max(30, int(ev.get("max_sort_time_s") or 600))
             rst_time = 0
         else:
-            record_base = _lerobot("lerobot-record") if bool(ev.get("auto_home", True)) \
+            record_base = _py() + [str(BACKEND_DIR / 'record_entry.py')] if bool(ev.get("auto_home", True)) and not asynchronous \
                 else _safe_record()
             num_ep = int(ev.get("num_episodes") or 1)
             ep_time = int(ev.get("episode_time_s") or 30)
@@ -2155,13 +2372,16 @@ def build_command(kind: str, cfg: dict, extra: Optional[dict] = None) -> list[st
         eval_cfg["cameras"] = eval_policy_cameras(cfg, str(ev.get("policy_path") or ""))
         return record_base + robot_base_args(
             eval_cfg, with_cameras=True, with_teleop=False, display=False) + [
-                f"--dataset.repo_id={ev['repo_id']}",
+                '--play_sounds=false', f"--dataset.repo_id={ev['repo_id']}",
                 f"--dataset.single_task={ev['single_task']}",
                 f"--dataset.num_episodes={num_ep}",
                 f"--dataset.episode_time_s={ep_time}",
                 f"--dataset.reset_time_s={rst_time}",
+                '--dataset.vcodec=h264', '--dataset.video_encoding_batch_size=1',
+                '--dataset.num_image_writer_threads_per_camera=2',
                 "--dataset.push_to_hub=false",
-                f"--policy.path={ev['policy_path']}"]
+                f"--policy.path={ev['policy_path']}"] + ([f'--policy.num_steps={flow_steps}'] if flow_steps else []) \
+                + ([f'--policy.n_action_steps={action_steps}'] if action_steps else [])
     if kind == "policy-server":
         return _py() + ["-m", "lerobot.async_inference.policy_server",
                         f"--model_path={ai['model_path']}",
@@ -2511,7 +2731,8 @@ def _guard(kind: str) -> None:
 
 
 def _spawn(kind: str, name: str, cmd: list[str], display: Optional[str] = None,
-           stdin_data: Optional[str] = None, env_extra: Optional[dict] = None) -> dict:
+           stdin_data: Optional[str] = None, env_extra: Optional[dict] = None,
+           config_snapshot: Optional[dict] = None) -> dict:
     """统一创建子进程 + 日志泵线程，任何失败都回滚状态并优雅报错。"""
     with STATE.lock:
         if STATE.running():
@@ -2536,18 +2757,41 @@ def _spawn(kind: str, name: str, cmd: list[str], display: Optional[str] = None,
         HUB.state(running=True, job=name, command=shown, kind=kind)
         if kind in CAMERA_JOB_KINDS and kind != 'find-cameras':
             env_extra = dict(env_extra or {})
-            cfg_now = load_config()
+            # The command and its environment must use the same settings.
+            # Autosave may update the file between build_command and _spawn.
+            cfg_now = config_snapshot if config_snapshot is not None else load_config()
             env_extra['REBOT_CAMERA_BROKER_URL'] = os.environ.get('REBOT_CAMERA_BROKER_URL', f'http://127.0.0.1:{PORT}')
             env_extra.update(TELEMETRY.environment(monitor_ports(cfg_now)))
             env_extra['PYTHONPATH'] = str(BACKEND_DIR)+os.pathsep+os.environ.get('PYTHONPATH','')
             if kind == 'eval':
                 ev_cfg = cfg_now.get('eval') or {}
+                env_extra['REBOT_ASYNC_ACT'] = '1' if bool(ev_cfg.get('async_inference', True)) else '0'
+                env_extra['REBOT_ASYNC_CHUNK'] = str(eval_action_chunk_steps(ev_cfg))
+                for field, variable in [('async_prefetch_ratio','REBOT_ASYNC_PREFETCH'),('async_max_age_s','REBOT_ASYNC_MAX_AGE'),
+                        ('async_wait_timeout_s','REBOT_ASYNC_WAIT'),('async_max_step_deg','REBOT_ASYNC_MAX_STEP')]:
+                    env_extra[variable] = str(ev_cfg.get(field, DEFAULT_CONFIG['eval'][field]))
                 env_extra['REBOT_KEEP_POSE'] = '0' if bool(ev_cfg.get('auto_home', True)) else '1'
                 env_extra['REBOT_CONTINUOUS_SORT'] = '1' if bool(ev_cfg.get('continuous_sort', False)) else '0'
                 idle_s = ev_cfg.get('idle_stop_s')
                 env_extra['REBOT_IDLE_STOP_S'] = str(8 if idle_s in (None, '') else max(0, float(idle_s)))
         job = Job(name=name, kind=kind, command=cmd, display=shown, stdin_data=stdin_data)
+        job.inference_mode = ('async_policy' if (env_extra or {}).get('REBOT_ASYNC_ACT') == '1' else 'synchronous') if kind == 'eval' else None
+        if kind == 'eval':
+            path = Path(str(cfg_now.get('eval', {}).get('policy_path') or '')).expanduser()
+            if not path.is_absolute():
+                path = ROOT / path
+            try:
+                job.policy_type = read_policy(path).get('type')
+            except ValueError:
+                pass
+        if job.inference_mode is not None:
+            label = 'SmolVLA' if job.policy_type == 'smolvla' else ('ACT' if job.policy_type == 'act' else '策略')
+            HUB.log('[策略评估] 本次执行模式：' + (label + ' 独立进程异步推理' if job.inference_mode == 'async_policy' else label + ' 同步推理（异步未开启）'), 'info')
+        if kind == 'record':
+            job.recording = RecordingProgress.from_command(cmd)
         job.step_label = name
+        if kind in ('record', 'eval'):
+            env_extra = dict(env_extra or {}, REBOT_WEB_RECORD_CONTROL='1')
         try:
             job.proc = _popen(cmd, stdin_data, env_extra)
         except FileNotFoundError:
@@ -2570,7 +2814,8 @@ def _spawn(kind: str, name: str, cmd: list[str], display: Optional[str] = None,
                          name=f"watch-{kind}").start()
         threading.Thread(target=_progress_beats, args=(job, job.progress_stop), daemon=True,
                          name=f"beat-{kind}").start()
-        return ok(name=name, kind=kind, job_id=job.job_id, command=shown)
+        return ok(name=name, kind=kind, job_id=job.job_id, started_at=job.started_at, command=shown,
+                  inference_mode=job.inference_mode, policy_type=job.policy_type)
 
 
 def _policy_job_env(kind: str, cfg: dict) -> Optional[dict]:
@@ -2598,9 +2843,10 @@ def _policy_job_env(kind: str, cfg: dict) -> Optional[dict]:
 def start_job(kind: str, name: str, cfg: dict, extra: Optional[dict] = None) -> dict:
     with STATE.lock:
         _guard(kind)
+        cfg = copy.deepcopy(cfg)
         cmd = build_command(kind, cfg, extra)
         env_extra = _policy_job_env(kind, cfg)
-    return _spawn(kind, name, cmd, env_extra=env_extra)
+    return _spawn(kind, name, cmd, env_extra=env_extra, config_snapshot=cfg)
 
 
 def start_train(backend: str, params: dict) -> dict:
@@ -2813,6 +3059,21 @@ def stop_all(force: bool = False) -> dict:
         job.stopping=True;stopped=job.name
         if not force:
             def cleanup():
+                if job.kind in ('record', 'eval') and job.stdin_live and job.proc and job.proc.stdin:
+                    try:
+                        with job.input_lock:
+                            job.proc.stdin.write(b'REBOT_RECORD_CONTROL esc\n')
+                            job.proc.stdin.flush()
+                        HUB.log('[停止] 已向任务进程发送保存并退出指令 (ESC)，等待当前剧集落盘与从臂归零...', 'info')
+                        try:
+                            job.proc.wait(timeout=180)
+                            if job.proc.poll() is not None:
+                                _finish_job_once(job, job.proc.returncode)
+                                return
+                        except subprocess.TimeoutExpired:
+                            HUB.log('[停止] 录制进程保存超时（180s），执行强制终止', 'warn')
+                    except (OSError, BrokenPipeError, ValueError):
+                        pass
                 _terminate(job.proc,graceful=True)
                 if job.proc and job.proc.poll() is not None:_finish_job_once(job,job.proc.returncode)
             threading.Thread(target=cleanup,daemon=True,name='slow-stop-'+job.kind).start()
@@ -2884,6 +3145,22 @@ def _dir_size(p: Path) -> int:
     return total
 
 
+def _dataset_storage(path: Path) -> dict:
+    sizes = {'videos': 0, 'images': 0, 'other': 0}
+    for base, _, files in os.walk(path):
+        for name in files:
+            file = Path(base) / name
+            try:
+                if file.is_symlink():
+                    continue
+                kind = 'videos' if file.suffix.lower() in ('.mp4', '.mkv', '.avi') else 'images' if file.suffix.lower() in ('.png', '.jpg', '.jpeg') else 'other'
+                sizes[kind] += file.stat().st_size
+            except OSError:
+                continue
+    return {'total_mb': round(sum(sizes.values()) / 1048576, 2),
+            **{key+'_mb': round(value / 1048576, 2) for key, value in sizes.items()}}
+
+
 def _dataset_episodes(d: Path) -> int:
     try:
         return int(json.loads((d / "meta" / "info.json").read_text("utf-8"))
@@ -2917,8 +3194,9 @@ def list_datasets() -> list[dict]:
             except OSError:
                 continue
         for repo_id, path in candidates:
+            storage = _dataset_storage(path)
             items.append({"repo_id": repo_id, "path": str(path),
-                          "size_mb": round(_dir_size(path) / 1048576, 2),
+                          "size_mb": storage['total_mb'], "storage": storage,
                           "episodes": _dataset_episodes(path)})
     except OSError as exc:
         HUB.log(f"[dataset] 扫描失败：{_brief(exc)}", "warn")
@@ -3045,15 +3323,14 @@ def camera_probe(index=0) -> Any:
         if DEVICES_RELEASED:
             raise ApiError("设备已全部断开，请先恢复监视或重新连接设备",409)
         key = source_key(index)
-        with STATE.lock:
-            config = {}
-            for c in load_config().get("cameras", []):
-                if source_key(c.get("index_or_path", 0)) == key:
-                    config = c
-                    break
-            if STATE.running() and STATE.job.kind == "find-cameras":
-                raise ApiError("SDK 扫描正在使用相机，请稍后重试", 409)
-            return CAMERAS.acquire(index, config)
+        config = {}
+        for c in load_config().get("cameras", []):
+            if source_key(c.get("index_or_path", 0)) == key:
+                config = c
+                break
+        if STATE.running() and STATE.job.kind == "find-cameras":
+            raise ApiError("SDK 扫描正在使用相机，请稍后重试", 409)
+        return CAMERAS.acquire(index, config)
     except CameraError as exc:
         raise ApiError(str(exc), 503)
 
@@ -3091,6 +3368,7 @@ async def lifespan(app: FastAPI):
     yield
     if globals().get('SORTING'):SORTING.close()
     TELEMETRY.close()
+    WAYBILL_SCANNER.close()
     VISION.stop()
     try:
         CAMERAS.close_all(exclusive=True)
@@ -3101,8 +3379,7 @@ async def lifespan(app: FastAPI):
         _terminate(STATE.job.proc)
 
 
-APP_VERSION='3.5.4'
-APP_BUILD='20261114.20'
+APP_VERSION, _, APP_BUILD = (ROOT / 'VERSION').read_text(encoding='utf-8').strip().partition('+')
 app = FastAPI(title="机械臂一键操控与训练平台", version=APP_VERSION, lifespan=lifespan)
 
 class BuildHeaders:
@@ -3145,7 +3422,7 @@ class ClientAuditMiddleware:
         if scope.get("type") == "http":
             method = scope.get("method", "")
             path = scope.get("path", "")
-            if method not in ("GET", "HEAD", "OPTIONS") and path.startswith("/api/"):
+            if method not in ("GET", "HEAD", "OPTIONS") and path.startswith("/api/") and path != "/api/waybill/scan":
                 headers = {}
                 for key, value in scope.get("headers") or []:
                     headers[key.decode("latin-1").lower()] = value.decode("latin-1")
@@ -3242,6 +3519,9 @@ def api_status():
             running = bool(job and not job.finished.is_set())
             p = _job_progress(job) if job else {}
             info = {"name": job.name, "kind": job.kind, "command": job.display,
+                    "inference_mode": job.inference_mode,
+                    "policy_type": job.policy_type,
+                    "inference_details": job.inference_details,
                     "elapsed": p["elapsed"], "exit_code": job.exit_code,
                     "step": p["step"], "step_total": p["step_total"],
                     "step_label": p["step_label"], "step_elapsed": p["step_elapsed"],
@@ -3249,11 +3529,14 @@ def api_status():
                     "silent_for": p["silent_for"],
                     "awaiting_input": p["awaiting_input"], "prompt": p["prompt"],
                     "job_id": p["job_id"], "prompt_id": p["prompt_id"], "stopping":job.stopping,
+                    "started_at": p['started_at'],
+                    "recording": p['recording'],
                     } if job else None
             snapshot_at=time.time()
         return {"status_ts":snapshot_at,"platform": platform.system(), "is_windows": IS_WINDOWS,
                 "running": running,
                 "job": info if running else None,
+                "last_job": info if job and not running else None,
                 "progress": info if running else None, "lerobot_home": str(LEROBOT_HOME),
                 "outputs_dir": str(OUTPUTS_DIR), "leader_type": LEADER_TYPE,
                 "follower_type": FOLLOWER_TYPE, "can_adapter": CAN_ADAPTER,
@@ -4098,6 +4381,77 @@ def api_zero_result(job_id: str):
                 'result':job.result,'last_line':job.last_line}
 
 
+_MOTOR_JOBS: dict[str, Job] = {}
+
+
+@app.get('/api/devices/motor-settings/capabilities')
+def api_motor_settings_capabilities():
+    """Describe the loaded motor advanced settings API without opening hardware."""
+    return {'ok':True,'api_version':1,'version':APP_VERSION,'build':APP_BUILD,
+            'actions':['read','write'],
+            'worker_available':(BACKEND_DIR/'motor_settings_worker.py').is_file()}
+
+
+@app.post('/api/devices/motor-settings/start')
+def api_motor_settings_start(payload: Optional[dict] = Body(default=None)):
+    e=payload or {};action=e.get('action');side=e.get('side','left');joints=e.get('joints')
+    if action not in ('read','write') or side not in DUAL_SIDES:
+        raise ApiError('无效的电机高级设置操作或从臂',400)
+    if not isinstance(joints,list) or not joints or any(isinstance(i,bool) or not isinstance(i,int) or i not in range(1,8) for i in joints):
+        raise ApiError('请选择 CAN ID 1～7 的关节',400)
+    persist=bool(e.get('persist',False))
+    max_speed=e.get('max_speed');acceleration=e.get('acceleration');deceleration=e.get('deceleration')
+    if action=='write':
+        if e.get('confirm') is not True:
+            raise ApiError('修改电机速度与加速度需要二次确认',400)
+        try:
+            spd=float(max_speed);acc=float(acceleration)
+            dec=-acc if deceleration is None else float(deceleration)
+        except (TypeError,ValueError) as exc:
+            raise ApiError('速度、加速度与减速度必须为有效数字',400) from exc
+        if not all(math.isfinite(v) for v in (spd,acc,dec)):
+            raise ApiError('速度、加速度与减速度必须为有限数值',400)
+        if not (0<spd<=100.0):raise ApiError('最大速度 (MAX_SPD) 需在 (0, 100] rad/s 范围内',400)
+        if not (0<acc<=100.0):raise ApiError('加速度 (ACC) 需在 (0, 100] rad/s² 范围内',400)
+        if not (-100.0<=dec<0):raise ApiError('减速度 (DEC) 需在 [-100, 0) rad/s² 范围内（负值）',400)
+        max_speed,acceleration,deceleration=spd,acc,dec
+    with STATE.lock:
+        if STATE.running():raise ApiError('请先结束当前动作，再进行电机高级设置',409)
+        if DEVICES_RELEASED:raise ApiError('设备已断开，请先恢复设备或重新连接',409)
+        require_env();cfg=load_config()
+        if dual_enabled(cfg):
+            arm=dual_side(cfg,side)
+            if arm['follower_type'] != FOLLOWER_TYPE:raise ApiError('仅支持 B601-DM 从臂电机参数设置',400)
+            follower={'port':arm['follower_port'],'id':arm['follower_id'],'can_adapter':arm['can_adapter'],'gripper_torque_ratio':arm['gripper_torque_ratio']}
+        else:
+            if side!='left':raise ApiError('单臂模式只有当前从臂',400)
+            follower=cfg.get('follower') or {}
+        target=_home_targets({'follower':follower,'dual_arm':{'enabled':False}})[0]
+        if e.get('expected_port') is not None and e['expected_port'] != target['port']:
+            raise ApiError('目标串口已变化，请重新确认后操作',409)
+        target.update(side=side,id=follower.get('id') or 'follower',action=action,
+                      joints=sorted(set(joints)),persist=persist,
+                      max_speed=max_speed,acceleration=acceleration,deceleration=deceleration)
+        TELEMETRY.stop_observers()
+        from backend.device_release import owners
+        if owners([target['port']]):raise ApiError('所选从臂串口被占用，未发送电机设置指令',409)
+        label={'read':'读取电机速度/加速度参数','write':'写入并保存电机速度/加速度' if persist else '写入电机速度/加速度'}[action]
+        result=_spawn('motor-settings',label,_py()+[str(BACKEND_DIR/'motor_settings_worker.py'),json.dumps(target)],
+                      env_extra=TELEMETRY.environment(monitor_ports(cfg)))
+        _MOTOR_JOBS[STATE.job.job_id]=STATE.job
+        while len(_MOTOR_JOBS)>20:_MOTOR_JOBS.pop(next(iter(_MOTOR_JOBS)))
+        return result
+
+
+@app.get('/api/devices/motor-settings/result')
+def api_motor_settings_result(job_id: str):
+    with STATE.lock:
+        job=_MOTOR_JOBS.get(job_id)
+        if not job:raise ApiError('电机设置任务结果已过期，请重新读取',404)
+        return {'ok':True,'job_id':job_id,'finished':job.finished.is_set(),'exit_code':job.exit_code,
+                'result':job.result,'last_line':job.last_line}
+
+
 @app.post('/api/devices/resume')
 def api_devices_resume():
     global DEVICES_RELEASED
@@ -4157,10 +4511,13 @@ async def api_depth_stream():
 
 
 @app.get("/api/camera/raw")
-async def api_camera_raw(device: str = '0'):
+async def api_camera_raw(device: str = '0', width: Optional[int] = None, height: Optional[int] = None):
+    if (width is None)!=(height is None) or (width is not None and not (16<=width<=7680 and 16<=height<=4320)):
+        raise ApiError('共享帧输出尺寸无效',400)
     cap = camera_probe(device)
+    def read():return cap.read(output_size=(width,height)) if width is not None else cap.read()
     try:
-        first = await asyncio.to_thread(cap.read)
+        first = await asyncio.to_thread(read)
     except CameraError as exc:
         cap.release(); raise ApiError(str(exc),503)
     except BaseException:
@@ -4171,7 +4528,7 @@ async def api_camera_raw(device: str = '0'):
             valid, frame = first
             while valid:
                 yield frame_packet(cap.seq, cap.captured_at, frame)
-                valid, frame = await asyncio.to_thread(cap.read)
+                valid, frame = await asyncio.to_thread(read)
         except CameraError as exc:
             if cap.session.error:
                 HUB.log(f"[camera] {exc}", "warn")
@@ -4365,8 +4722,7 @@ def api_record_key(payload: Optional[dict] = Body(default=None)):
     key = str((payload or {}).get("key") or "right").lower()
     desc = {"right": "提前终止当前剧集，进入下一集", "left": "取消当前剧集并重新录制",
             "esc": "保存并编码当前剧集后结束会话"}
-    mapping = {"right": "Right", "left": "Left", "esc": "Escape"}
-    if key not in mapping:
+    if key not in desc:
         raise ApiError("按键只能是 right / left / esc", 400)
     with STATE.lock:
         job = STATE.job
@@ -4374,27 +4730,14 @@ def api_record_key(payload: Optional[dict] = Body(default=None)):
             raise ApiError("当前没有正在运行的录制任务，按键未发送", 409)
         if job.kind != "record":
             raise ApiError(f"当前任务不是录制（{job.name}），按键未发送", 409)
-    # 绝不能在发送按键前调 stop_all()：SIGTERM 会让 lerobot-record 以 -15 退出，
-    # 当前剧集来不及保存/编码。ESC 只负责把按键送进录制进程，由它自己收尾。
-    if shutil.which("xdotool") is None:
-        raise ApiError(
-            "未安装 xdotool，无法把按键送进录制进程。请在运行 start.py 的终端直接按 "
-            f"{key.upper()}（{desc[key]}），或安装 xdotool 后重试：sudo apt install -y xdotool。"
-            "注意：用「急停」会直接 SIGTERM，可能来不及保存当前剧集。", 409)
-    try:
-        r = subprocess.run(["xdotool", "key", mapping[key]], capture_output=True,
-                           text=True, timeout=5,
-                           encoding=SUBPROC_KW_ENCODING, errors="replace")
-    except subprocess.TimeoutExpired:
-        raise ApiError("发送按键超时（5 秒）", 504)
-    except OSError as exc:
-        raise ApiError(f"发送按键失败：{_brief(exc)}", 500)
-    if r.returncode != 0:
-        detail = (r.stderr or "").strip() or f"xdotool 退出码 {r.returncode}"
-        raise ApiError(f"xdotool 发送失败：{detail}。请在运行 start.py 的终端直接按键，"
-                       "或确认网页服务进程有 DISPLAY 权限", 500)
-    HUB.log(f"已发送按键 {key.upper()}：{desc[key]}", "ok")
-    return ok(key=key)
+        if not job.record_control_ready:
+            raise ApiError('录制控制尚未就绪：请等待连接/校准完成；无需设置 DISPLAY 或安装 xdotool', 409)
+        if job.recording and job.recording.phase == 'closing':
+            raise ApiError('采集正在收尾，未再次发送控制命令', 409)
+        # Address this exact child; never inject a desktop-wide key or send SIGINT.
+        write_job_input('REBOT_RECORD_CONTROL ' + key + '\n', job_id=job.job_id)
+    HUB.log(f'[录制控制] 已发送 {key.upper()}：{desc[key]}', 'ok')
+    return ok(key=key, transport='stdin')
 
 
 def _dataset_view_root(repo_id: str) -> Path:
@@ -4696,39 +5039,87 @@ def api_dataset_replay(payload: Optional[dict] = Body(default=None)):
 
 
 @app.get("/api/dataset/export")
-def api_export_dataset(repo_id: str, mode: str = "all"):
-    """一键导出已录制数据集（mode=all 导出完整数据集含数据+视频，mode=videos 仅导出视频 MP4）。"""
+def api_export_dataset(repo_id: str = "", mode: str = "all", repo_ids: str = ""):
+    """一键导出已录制数据集（mode=all 导出完整数据集含数据+视频，mode=videos 仅导出视频 MP4）。
+    支持单个 repo_id 或以逗号分隔的多个 repo_ids 批量打包导出。"""
     import zipfile
     from starlette.background import BackgroundTask
-    target = _safe_dataset_path(repo_id)
-    if target is None or not target.is_dir():
+    raw_ids = [r.strip() for r in (repo_ids.split(",") if repo_ids else [repo_id]) if r.strip()]
+    if not raw_ids:
+        raise ApiError("请指定要导出的数据集", 400)
+    targets = []
+    for rid in raw_ids:
+        t = _safe_dataset_path(rid)
+        if t is not None and t.is_dir():
+            targets.append((rid, t))
+    if not targets:
         raise ApiError("数据集不存在或路径非法", 404)
     only_videos = (str(mode).lower() == "videos")
-    src_root = (target / "videos") if only_videos else target
-    if only_videos and not src_root.is_dir():
-        raise ApiError("该数据集内没有已编码的视频目录（videos/）", 404)
-    files = [f for f in sorted(src_root.rglob("*")) if f.is_file()]
-    if not files:
-        raise ApiError("没有可导出的文件", 404)
-    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", repo_id.strip("/")) or "dataset"
+    all_entries = []
+    for rid, t in targets:
+        src_root = (t / "videos") if only_videos else t
+        if only_videos and not src_root.is_dir():
+            continue
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", rid.strip("/")) or "dataset"
+        files = [f for f in sorted(src_root.rglob("*")) if f.is_file()]
+        for f in files:
+            rel = f.relative_to(t)
+            all_entries.append((f, f"{safe_name}/{rel.as_posix()}"))
+    if not all_entries:
+        raise ApiError("所选数据集内没有可导出的文件（或没有已编码视频）", 404)
     suffix = "_videos.zip" if only_videos else "_full.zip"
-    fd, tmp_zip = tempfile.mkstemp(prefix=f"rebot_{safe_name}_", suffix=".zip")
+    if len(targets) == 1:
+        single_name = re.sub(r"[^A-Za-z0-9._-]+", "_", targets[0][0].strip("/")) or "dataset"
+        zip_prefix = f"rebot_{single_name}_"
+        download_filename = f"{single_name}{suffix}"
+    else:
+        zip_prefix = f"rebot_batch_{len(targets)}_datasets_"
+        download_filename = f"batch_{len(targets)}_datasets{suffix}"
+    fd, tmp_zip = tempfile.mkstemp(prefix=zip_prefix, suffix=".zip")
     os.close(fd)
     try:
         with zipfile.ZipFile(tmp_zip, "w", compression=zipfile.ZIP_STORED) as zf:
-            for f in files:
-                rel = f.relative_to(target)
-                zf.write(f, arcname=f"{safe_name}/{rel.as_posix()}")
+            for f, arcname in all_entries:
+                zf.write(f, arcname=arcname)
     except Exception as exc:
         Path(tmp_zip).unlink(missing_ok=True)
         raise ApiError(f"打包导出失败：{_brief(exc)}", 500)
-    HUB.log(f"[导出] 数据集 {repo_id} ({'仅视频' if only_videos else '完整数据+视频'}，共 {len(files)} 个文件)", "ok")
+    label = targets[0][0] if len(targets) == 1 else f"{len(targets)} 个数据集"
+    HUB.log(f"[导出] 数据集 {label} ({'仅视频' if only_videos else '完整数据+视频'}，共 {len(all_entries)} 个文件)", "ok")
     return FileResponse(
         tmp_zip,
         media_type="application/zip",
-        filename=f"{safe_name}{suffix}",
+        filename=download_filename,
         background=BackgroundTask(lambda p=tmp_zip: Path(p).unlink(missing_ok=True)),
     )
+
+
+@app.post("/api/datasets/batch-delete")
+def api_batch_delete_datasets(payload: Optional[dict] = Body(default=None)):
+    """批量删除已录制数据集。"""
+    e = payload or {}
+    repo_ids = [str(x).strip() for x in (e.get("repo_ids") or []) if str(x).strip()]
+    confirm = bool(e.get("confirm", False))
+    if not confirm:
+        raise ApiError("批量删除数据集需要二次确认", 400)
+    if not repo_ids:
+        raise ApiError("请先选择要删除的数据集", 400)
+    deleted, failed = [], []
+    for rid in repo_ids:
+        target = _safe_dataset_path(rid)
+        if target is None:
+            failed.append({"repo_id": rid, "error": "非法路径"})
+            continue
+        if not target.exists():
+            failed.append({"repo_id": rid, "error": "不存在"})
+            continue
+        try:
+            shutil.rmtree(target)
+            deleted.append(rid)
+            HUB.log(f"数据集已删除：{target}", "warn")
+        except OSError as exc:
+            failed.append({"repo_id": rid, "error": _brief(exc)})
+    return ok(deleted=deleted, failed=failed)
 
 
 @app.delete("/api/datasets/{repo_id:path}")
@@ -4848,8 +5239,15 @@ def api_train_resume(payload: Optional[dict] = Body(default=None)):
 
 
 @app.post("/api/eval")
-def api_eval():
-    return start_job("eval", "策略评估", load_config())
+def api_eval(payload: Optional[dict] = Body(default=None)):
+    cfg = load_config()
+    if payload:
+        if set(payload) != {'eval'} or not isinstance(payload['eval'], dict):
+            raise ApiError('评估请求仅接受 eval 参数对象', 400)
+        # Use the settings from this button click even if another autosave
+        # request completes between saving the form and starting the job.
+        cfg = _deep_merge(cfg, {'eval': payload['eval']})
+    return start_job("eval", "策略评估", cfg)
 
 
 @app.post("/api/policy-server")
@@ -6310,10 +6708,13 @@ _WAYBILL_LOCK = threading.Lock()
 _WAYBILL_HISTORY: list[dict] = []
 _WAYBILL_LATEST: Optional[dict] = None
 _WAYBILL_LOADED = False
+WAYBILL_SCANNER = WaybillProcess()
 WAYBILL_DIR = OUTPUTS_DIR / "waybills"
 WAYBILL_JSON = WAYBILL_DIR / "recognized_waybills.json"
 WAYBILL_CSV = WAYBILL_DIR / "recognized_waybills.csv"
 WAYBILL_TXT = WAYBILL_DIR / "recognized_waybills.txt"
+
+
 
 
 def _format_waybill_csv(items: list[dict]) -> str:
@@ -6385,63 +6786,8 @@ def _persist_waybill_files() -> None:
         HUB.log(f"[快递单号识别] 写入单号文件失败：{_brief(exc)}", "warn")
 
 
-def _decode_waybill_frame(image: Any) -> dict:
-    """从单帧 BGR 图像中识别一维条码（Code128/Code39/EAN/ITF 等）与二维码。"""
-    import cv2
-    import numpy as np
 
-    if image is None or not hasattr(image, "shape") or image.size == 0:
-        return {"codes": [], "sharpness": 0.0}
 
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
-    sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-    found: list[dict] = []
-    seen: set[tuple[str, str]] = set()
-
-    def _add(text: Any, fmt: Any) -> None:
-        t = str(text or "").strip()
-        f = str(fmt or "Barcode").strip().replace("BarcodeFormat.", "")
-        if not t or len(t) < 3:
-            return
-        key = (t, f)
-        if key not in seen:
-            seen.add(key)
-            found.append({"text": t, "type": f})
-
-    # 1. 优先使用 zxing-cpp（支持一维快递面单条码 Code128/Code39/ITF/EAN 及 QR/DataMatrix）
-    try:
-        import zxingcpp  # type: ignore
-
-        clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8)).apply(gray)
-        candidates = [image, gray, clahe]
-        for cand in candidates:
-            for item in zxingcpp.read_barcodes(cand):
-                _add(getattr(item, "text", ""), getattr(item, "format", "Barcode"))
-            if found:
-                break
-        # 若原图未扫出且分辨率较低，放大 1.7 倍再试一次细小面单条码
-        if not found and min(gray.shape[:2]) <= 720:
-            up = cv2.resize(clahe, None, fx=1.7, fy=1.7, interpolation=cv2.INTER_CUBIC)
-            for item in zxingcpp.read_barcodes(up):
-                _add(getattr(item, "text", ""), getattr(item, "format", "Barcode"))
-    except Exception:
-        pass
-
-    # 2. OpenCV QRCodeDetector 兜底
-    if not found:
-        try:
-            qr = cv2.QRCodeDetector()
-            ok, decoded_info, _, _ = qr.detectAndDecodeMulti(gray)
-            if ok and decoded_info:
-                for txt in decoded_info:
-                    _add(txt, "QRCode")
-            else:
-                txt, _, _ = qr.detectAndDecode(gray)
-                _add(txt, "QRCode")
-        except Exception:
-            pass
-
-    return {"codes": found, "sharpness": round(sharpness, 1)}
 
 
 @app.get("/api/waybill/history")
@@ -6495,8 +6841,9 @@ def api_waybill_clear():
 def api_waybill_scan(payload: Optional[dict] = Body(default=None)):
     global _WAYBILL_LATEST
     req = payload or {}
-    target_cam = str(req.get("camera") or "all").strip()
+    target_cam = req.get("camera", "all")
     save_to_file = bool(req.get("save", True))
+    include_preview = bool(req.get("include_preview", True))
     cfg = load_config()
     cams = cfg.get("cameras") or []
     with _WAYBILL_LOCK:
@@ -6515,77 +6862,52 @@ def api_waybill_scan(payload: Optional[dict] = Body(default=None)):
             "scanned_cameras": [],
         }
 
-    selected_cams = []
-    if not target_cam or target_cam.lower() == "all":
-        selected_cams = list(cams)
-    else:
-        for c in cams:
-            c_name = str(c.get("name") or "").strip()
-            c_src = str(c.get("index_or_path", "")).strip()
-            if target_cam in (c_name, c_src) or source_key(target_cam) == source_key(c_src):
-                selected_cams.append(c)
-        if not selected_cams:
-            selected_cams = list(cams)
-
-    scanned_cameras: list[dict] = []
-    detected_now: list[dict] = []
-    errors: list[str] = []
-    now_str = time.strftime("%H:%M:%S")
-    now_dt = time.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        selected_cams = select_cameras(cams, target_cam)
+    except CameraError as exc:
+        raise ApiError(str(exc), 400) from exc
+    if DEVICES_RELEASED:
+        raise ApiError('设备已断开，请先恢复监视或连接设备', 409)
+    with STATE.lock:
+        active = STATE.job if STATE.running() else None
+        if active and active.kind == 'find-cameras':
+            raise ApiError('SDK 正在扫描相机，请稍后扫码', 409)
+        # Recording must remain the sole owner of its capture profiles. Scanner
+        # only reads existing cached JPEGs while any device task is active.
+        start_capture = active is None
+    scanned_cameras, detected_now, errors, snapshots = [], [], [], []
+    now_str = time.strftime('%H:%M:%S')
+    now_dt = time.strftime('%Y-%m-%d %H:%M:%S')
     now_ts = round(time.time(), 3)
-
     for c in selected_cams:
-        cam_name = str(c.get("name") or c.get("index_or_path") or "camera")
-        src = c.get("index_or_path", 0)
-        cap = None
+        name, source = str(c.get('name') or c.get('index_or_path')), c.get('index_or_path', 0)
         try:
-            cap = camera_probe(src)
-            ok_read, frame = cap.read()
-            if not ok_read or frame is None:
-                errors.append(f"{cam_name}({src}): 未读到画面帧")
-                scanned_cameras.append({
-                    "name": cam_name,
-                    "source": str(src),
-                    "ok": False,
-                    "sharpness": 0.0,
-                    "found": 0,
-                })
-                continue
-            res = _decode_waybill_frame(frame)
-            codes = res.get("codes") or []
-            scanned_cameras.append({
-                "name": cam_name,
-                "source": str(src),
-                "ok": True,
-                "sharpness": res.get("sharpness", 0.0),
-                "found": len(codes),
-            })
+            seq, captured_at, jpeg = CAMERAS.snapshot(source, c, start_capture=start_capture)
+            snapshots.append({'name': name, 'source': str(source), 'sequence': seq,
+                              'captured_at': captured_at, 'jpeg': jpeg,
+                              'include_preview': include_preview})
+        except Exception as exc:
+            errors.append(f'{name}({source}): {_brief(exc)}')
+            scanned_cameras.append({'name': name, 'source': str(source), 'ok': False,
+                'sharpness': 0, 'found': 0, 'label_rois': 0, 'boxes': [], 'preview': '', 'exposure_hint': str(exc)})
+    if snapshots:
+        try:
+            decoded = WAYBILL_SCANNER.scan(snapshots)
+        except ScanBusy as exc:
+            return {'ok': True, 'processing': True, 'found': False, 'saved': False,
+                    'codes': [], 'new_codes': [], 'latest': cur_latest if save_to_file else None,
+                    'count': cur_count, 'scanned_cameras': [], 'message': str(exc)}
+        except ScanError as exc:
+            decoded = []
+            errors.append(str(exc))
+        for camera in decoded:
+            codes = camera.pop('codes', [])
+            scanned_cameras.append(camera)
+            if camera.get('error'): errors.append(camera['error'])
             for item in codes:
-                entry = {
-                    "text": item["text"],
-                    "type": item["type"],
-                    "camera": cam_name,
-                    "source": str(src),
-                    "time": now_str,
-                    "datetime": now_dt,
-                    "ts": now_ts,
-                }
-                detected_now.append(entry)
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"{cam_name}({src}): {_brief(exc)}")
-            scanned_cameras.append({
-                "name": cam_name,
-                "source": str(src),
-                "ok": False,
-                "sharpness": 0.0,
-                "found": 0,
-            })
-        finally:
-            if cap is not None:
-                try:
-                    cap.release()
-                except Exception:
-                    pass
+                detected_now.append({'text': item['text'], 'type': item['type'],
+                    'camera': camera['name'], 'source': camera['source'],
+                    'time': now_str, 'datetime': now_dt, 'ts': now_ts})
 
     new_codes: list[dict] = []
     if save_to_file:

@@ -1,0 +1,31 @@
+{
+  "role": "model_trainer",
+  "version": "3.5.16+20261117.03",
+  "entrypoint": "train.py",
+  "files": {
+    "README.md": "a58c80152fbe3af269d897b1ad1eb2e387110020144cc1be9d886205414feb71",
+    "THIRD_PARTY_NOTICES.md": "b3b84f29b2e5a876ed0341a648229203062aa885c9c1f6b883ca4e825cedbc42",
+    "dependency_versions.json": "d961ed79fff0527e4a2b6494f16a326c1e0a18ad290e8cbf8354ff966379fff5",
+    "export_handoff.py": "34b265a07fe581aacfcd8333b64016cb3b10e8d609ef79c1a16edc3644ce0db7",
+    "requirements.txt": "4d0916a7c9704a1f6f5d14f9870c85f1491771cb2980a89796a4d177203f3d7c",
+    "train.py": "2cd25fa2c1c9db8cc0b86c4d1970a485eac30b84c87e1a93141a5d44293a55e7",
+    "verify_bundle.py": "7eb21ff96d571d1bdb6a3a072e41bfd1b50f3aeb48325278a91b4b41f524ac8e",
+    "wall_oss_05/NATIVE_WALLX.md": "f5e0ded94fad05da32f6d1f0de65ec11f76ca8daa58418cb7847d40c52d49159",
+    "wall_oss_05/README.md": "c1415a808e9c4574149796da570ff76f9084840f739b0dac7951108ff23c98aa",
+    "wall_oss_05/camera_mapping.json": "0c372771076f52d8d6bbb43f1f611c9c625f0e218c2ec2c19dfa1efd342bf6da",
+    "wall_oss_05/contract.py": "342be52d3fa69df4f6d80a117628a5bc2030413f49f51baa3146b725864a6a8a",
+    "wall_oss_05/export_model.py": "d0ef61e615b102c07bb9f6e812d8220cafcec0a3f073fbb00b08697f139c7f21",
+    "wall_oss_05/native_common.py": "15849cafa3a94eb38276061eb6c38ca8eaaea9e9b3b7e9c1918580d53cd1565a",
+    "wall_oss_05/native_export.py": "8cf5c68cf495032550eaf44cba4db4ff76448f8dc786730b8422266243f069d3",
+    "wall_oss_05/native_openloop.py": "28698b95761634d7774a133e92cc61f9b1f5eaeac386edf40bc7ebebab1edd12",
+    "wall_oss_05/native_serve.py": "f5e3d8789c1cdf7bf41a6de48a7f88d9b91bda23d4ecd4cbe24f792175a8a624",
+    "wall_oss_05/native_train.py": "a8ab73727d0d24190373f6b26029cea28bb6bafe4d2859b1c1badbb9dd277beb",
+    "wall_oss_05/native_train_entry.py": "e9a829be7fdb9edcbf47b4dfa6bfb3583e156c27d113436f07474118a41a2c9c",
+    "wall_oss_05/requirements-common.txt": "1872715f0b843fe0c8913b8bcb7fdef664a9d95c0a0267a404626e34f73905ef",
+    "wall_oss_05/requirements-inference.txt": "761f5651b05ba172fb22377b281d7db1a6365490d031ba259955b855121fbf78",
+    "wall_oss_05/requirements-native-data.txt": "3e976d7e3d490e7a3a673e4ed088f4b2dc6c1a1ebb81c4510d36da3d2eee7503",
+    "wall_oss_05/requirements-train.txt": "b3aa05823c36ea41c65959742f3798d6c443df3093dcf2f8dff8b10476a725c0",
+    "wall_oss_05/train_remote.py": "76d055391fa7de6abc657bbe3d25e479006361e4d070f05feacfdbc29f4c8528",
+    "wall_oss_05/validate_model.py": "70a77258f64d09c6446e790f088cfd6d5f69e54218e5d5c3a52b9061358d1de9"
+  }
+}

@@ -141,13 +141,14 @@ function status(){return {status_ts:Date.now()/1000,running:!!job,job:job?{...jo
   updateJob(null);await page.locator('#jobInputDialog[open]').waitFor({state:'hidden'});
   await page.locator('#btnHomeDisable').click();
   await page.locator('.notify-modal.confirm').waitFor();assert.equal(motion.length,0);
+  assert.match(await page.locator('.notify-modal.confirm').innerText(),/双臂同时收回/);
   await page.locator('.notify-modal.confirm [data-ok]').click();
   for(let n=0;n<50&&!motion.length;n++)await page.waitForTimeout(20);
   assert.deepEqual(motion,['/api/devices/home-and-disable']);assert.equal(await page.locator('#btnHomeDisable').isDisabled(),true);
   updateJob(null);await page.waitForFunction(()=>!document.querySelector('#btnHomeDisable').disabled,null,{timeout:10000});
   console.log('PASS global prompts and confirmed homing');
   await page.setViewportSize({width:1440,height:1000});
-  await page.locator('.nav a[href="/p/eval"]').click();await frame.locator('summary').filter({hasText:'高级：独立 ACT 真机评估'}).click();await frame.locator('#btnEvalHomeDisable').waitFor();
+  await page.locator('.nav a[href="/p/eval"]').click();await frame.locator('#btnEvalHomeDisable').waitFor();
   updateJob({job_id:'eval-finish-test',name:'策略评估',kind:'eval',awaiting_input:false});
   await frame.locator('#btnEvalHomeDisable').click();await page.locator('.notify-modal.confirm [data-cancel]').click();
   assert.equal(stops.length,0);assert.equal(motion.length,1);

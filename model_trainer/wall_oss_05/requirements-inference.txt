@@ -1,0 +1,5 @@
+# INFERENCE device only. Separate from existing ACT/serial/CAN environment.
+# ALTERNATE LeRobot-native format. Current upstream Wall-X workflow: NATIVE_WALLX.md.
+# No training/PEFT extras: export_model.py merges adapters on the training machine.
+-r requirements-common.txt
+lerobot[wall_oss_05,dataset] @ git+https://github.com/huggingface/lerobot.git@7910c20a75834ad3fa6a9792df4d44a614d1bba6

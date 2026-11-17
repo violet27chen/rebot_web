@@ -5,14 +5,24 @@
   var preview={dialog:null,kind:null,record:null,frame:0,home:null,placeholder:null,returnFocus:null};
   var geometryBinding,dual=false,modelError='',bindings={},bindingGeneration=0,bindingSignature='',serverOffset=0;
   function canonical(source){var s=String(source);return /^\d+$/.test(s)?'/dev/video'+Number(s):s;}
-  function image(source){var r=streams.get(canonical(source));return r&&r.box.dataset.live==='true'&&r.img;}
-  function stop(record){record.open=false;clearTimeout(record.timer);record.img.removeAttribute('src');record.box.dataset.live='false';record.note.textContent=paused?'设备已断开':'预览已暂停';}
+  function ready(record){
+    if(!record.open||!record.img.naturalWidth||!record.img.naturalHeight)return false;
+    record.attempts=0;record.box.dataset.live='true';record.note.textContent='实时画面';
+    var box=record.box.querySelector('.monitor-image');if(box)box.style.aspectRatio=record.img.naturalWidth+' / '+record.img.naturalHeight;return true;
+  }
+  function image(source){var r=streams.get(canonical(source));return r&&ready(r)&&r.img;}
+  function ensureSource(source){var r=streams.get(canonical(source));if(!r||paused)return false;r.disabled=false;if(!r.open&&!r.timer)start(r);return true;}
+  function sourceState(source){var r=streams.get(canonical(source));return {paused:paused,live:!!(r&&ready(r)),message:paused?'设备已断开，请恢复预览':r?r.note.textContent:'正在等待相机配置同步'};}
+  function stop(record){record.open=false;clearTimeout(record.timer);record.timer=null;record.img.removeAttribute('src');record.box.dataset.live='false';record.note.textContent=paused?'设备已断开':'预览已暂停';}
   function start(record){
     if(paused||record.disabled)return;record.open=true;clearTimeout(record.timer);record.note.textContent='正在连接…';record.box.dataset.live='false';
-    record.img.onerror=function(){if(paused)return;record.open=false;record.box.dataset.live='false';record.note.textContent='离线 · 正在重连';record.attempts=(record.attempts||0)+1;record.timer=setTimeout(function(){start(record);},Math.min(30000,1000*Math.pow(2,Math.min(record.attempts,5))));};
-    record.img.onload=function(){if(!record.open)return;record.attempts=0;record.box.dataset.live='true';record.note.textContent='实时画面';var mImg=record.box.querySelector('.monitor-image');if(mImg&&record.img.naturalWidth&&record.img.naturalHeight)mImg.style.aspectRatio=record.img.naturalWidth+' / '+record.img.naturalHeight;};
+    record.img.onerror=function(){if(paused)return;clearTimeout(record.timer);record.open=false;record.box.dataset.live='false';record.note.textContent='离线 · 正在重连';record.attempts=(record.attempts||0)+1;record.timer=setTimeout(function(){record.timer=null;start(record);},Math.min(30000,1000*Math.pow(2,Math.min(record.attempts,5))));};
+    record.img.onload=function(){if(ready(record)){clearTimeout(record.timer);record.timer=null;}};
     record.img.src=record.url+'&t='+Date.now();
-    record.timer=setTimeout(function(){if(record.open&&!record.img.naturalWidth&&!paused)record.img.onerror();},12000);
+    // MJPEG may paint frames before firing load (the HTTP stream never ends).
+    var deadline=Date.now()+12000;
+    function firstFrame(){record.timer=null;if(!record.open||paused)return;if(ready(record))return;if(Date.now()>=deadline){record.img.onerror();return;}record.timer=setTimeout(firstFrame,100);}
+    record.timer=setTimeout(firstFrame,100);
   }
   function setPaused(value){paused=!!value;panel.classList.toggle('devices-paused',paused);A.el('monitorResume').hidden=!paused;
     streams.forEach(function(r){if(paused)stop(r);else if(!r.img.getAttribute('src'))start(r);});
@@ -31,19 +41,11 @@
       preview.kind=preview.record=preview.home=preview.placeholder=null;A.el('monitorPreviewImage').hidden=false;
       if(preview.returnFocus&&preview.returnFocus.isConnected)preview.returnFocus.focus({preventScroll:true});
     });
-    A.el('monitorPreviewImage').onclick=async function(e){
-      if(preview.kind!=='depth'||!preview.record||preview.record.box.dataset.live!=='true')return;
-      var canvas=this,rect=canvas.getBoundingClientRect(),scale=Math.min(rect.width/canvas.width,rect.height/canvas.height);
-      var x=Math.floor((e.clientX-rect.left-(rect.width-canvas.width*scale)/2)/scale),y=Math.floor((e.clientY-rect.top-(rect.height-canvas.height*scale)/2)/scale);
-      if(x<0||y<0||x>=canvas.width||y>=canvas.height)return;
-      try{var r=await A.api.get('/api/depth/point?x='+x+'&y='+y);if(preview.kind==='depth')A.el('monitorPreviewFooter').textContent='像素 ('+x+', '+y+') · '+(r.depth_mm===null?'无有效深度':r.depth_mm+' mm')+' · 深度未与 RGB 对齐';}
-      catch(error){A.el('monitorPreviewFooter').textContent=error.message;}
-    };
   }
   function openPreview(record){
-    if(preview.dialog.open)preview.dialog.close();preview.kind=record.id==='@depth'?'depth':'rgb';preview.record=record;preview.returnFocus=document.activeElement;
-    A.el('monitorPreviewTitle').textContent=record.title;A.el('monitorPreviewSubtitle').textContent=record.id==='@depth'?'真实深度 · 原生毫米数据的实时色彩图':'实时 RGB · 与常驻预览共用同一帧';
-    A.el('monitorPreviewFooter').textContent=record.id==='@depth'?'点击深度图读取毫米值；点击 ×、空白遮罩或按 Esc 关闭。':'点击 ×、空白遮罩或按 Esc 关闭。';
+    if(preview.dialog.open)preview.dialog.close();preview.kind='rgb';preview.record=record;preview.returnFocus=document.activeElement;
+    A.el('monitorPreviewTitle').textContent=record.title;A.el('monitorPreviewSubtitle').textContent='实时 RGB · 与常驻预览共用同一帧';
+    A.el('monitorPreviewFooter').textContent='点击 ×、空白遮罩或按 Esc 关闭。';
     A.el('monitorPreviewImage').hidden=false;preview.dialog.showModal();
     var canvas=A.el('monitorPreviewImage'),context=canvas.getContext('2d'),empty=A.el('monitorPreviewEmpty');
     function paint(){
@@ -67,7 +69,7 @@
   function tile(id,title,source,url){
     var box=document.createElement('article');box.className='monitor-feed';box.dataset.source=source;
     box.innerHTML='<header><strong></strong><span class="monitor-feed-state">正在连接…</span></header><div class="monitor-image" role="button" tabindex="0"><img alt=""><span class="monitor-empty">等待设备画面</span><span class="monitor-expand" aria-hidden="true">放大 ↗</span></div><footer></footer>';
-    box.querySelector('strong').textContent=title;var img=box.querySelector('img');img.alt=title+' 实时画面';box.querySelector('footer').textContent=id==='@depth'?'真实深度 · mm · 点击放大':source;
+    box.querySelector('strong').textContent=title;var img=box.querySelector('img');img.alt=title+' 实时画面';box.querySelector('footer').textContent=source;
     var record={box:box,img:img,note:box.querySelector('.monitor-feed-state'),url:url,id:id,title:title,disabled:false};
     var button=box.querySelector('.monitor-image');button.setAttribute('aria-label','放大查看 '+title);button.onclick=function(){openPreview(record);};button.onkeydown=function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();openPreview(record);}};
     return record;
@@ -140,8 +142,7 @@
       if(!record){record=tile(id,c.name,id,'/api/camera/stream?device='+encodeURIComponent(c.index_or_path));streams.set(id,record);grid.appendChild(record.box);record.signature=signature;var mImg0=record.box.querySelector('.monitor-image');if(mImg0&&c.width&&c.height)mImg0.style.aspectRatio=Number(c.width)+' / '+Number(c.height);start(record);}
       else{record.title=c.name;record.box.querySelector('strong').textContent=c.name;var mImg1=record.box.querySelector('.monitor-image');if(mImg1&&c.width&&c.height)mImg1.style.aspectRatio=Number(c.width)+' / '+Number(c.height);if(record.signature!==signature){record.signature=signature;record.url='/api/camera/stream?device='+encodeURIComponent(c.index_or_path);stop(record);start(record);}}
     });
-    wanted.add('@depth');streams.forEach(function(record,id){if(!wanted.has(id)){if(preview.record===record)preview.dialog.close();stop(record);record.box.remove();streams.delete(id);}});
-    if(!streams.has('@depth')){var d=tile('@depth','深度相机 · Depth','@depth','/api/depth/stream?view=color');streams.set('@depth',d);grid.appendChild(d.box);start(d);}
+    streams.forEach(function(record,id){if(!wanted.has(id)){if(preview.record===record)preview.dialog.close();stop(record);record.box.remove();streams.delete(id);}});
   }
   function applyArm(arm){
     if(!arm||!world||paused||!Array.isArray(arm.joints)||arm.joints.length!==6||!arm.joints.every(function(q){return typeof q==='number'&&Number.isFinite(q);})||typeof arm.timestamp!=='number'||!Number.isFinite(arm.timestamp))return;
@@ -155,7 +156,7 @@
     socket.onmessage=function(event){var p=JSON.parse(event.data);
       acceptBindings(p);if(p.type==='snapshot'){setPaused(p.released||p.paused);['left','right'].forEach(resetArm);Object.values(p.arms||{}).forEach(applyArm);}if(p.type==='feedback')applyArm(p.arm);if(p.type==='device-session')setPaused(p.paused);
       if(p.type==='health'){A.el('monitorConnection').textContent=p.cameras&&p.cameras.capture_pid?'共享视觉 PID '+p.cameras.capture_pid:'视觉服务待机';if(paused!==!!p.released)setPaused(p.released);
-        (p.cameras&&p.cameras.sessions||[]).forEach(function(s){var r=streams.get(canonical(s.source))||streams.get(canonical(s.device));if(r&&r.open&&(s.error||!s.active||s.age_ms>2000))r.img.onerror();});if(p.depth&&p.depth.error){var d=streams.get('@depth');if(d)d.note.textContent=p.depth.error;}}
+        (p.cameras&&p.cameras.sessions||[]).forEach(function(s){var r=streams.get(canonical(s.source))||streams.get(canonical(s.device));if(r&&r.open&&(s.error||!s.active||s.age_ms>2000))r.img.onerror();});}
     };socket.onclose=function(){A.el('monitorConnection').textContent='反馈离线 · 正在重连';clearTimeout(retry);retry=setTimeout(connect,1500);};
   }
   async function mount(){
@@ -173,5 +174,5 @@
     }catch(error){A.el('monitorConnection').textContent=error.message;}
     function readyImages(){streams.forEach(function(r){if(r.open&&r.img.naturalWidth&&r.img.currentSrc===r.img.src&&r.box.dataset.live!=='true'){r.box.dataset.live='true';r.note.textContent='实时画面';r.attempts=0;var mImg=r.box.querySelector('.monitor-image');if(mImg&&r.img.naturalHeight)mImg.style.aspectRatio=r.img.naturalWidth+' / '+r.img.naturalHeight;}});requestAnimationFrame(readyImages);}readyImages();A.autosave.onConfig(configure);connect();
   }
-  window.MONITOR={mount:mount,getImage:image,paused:function(){return paused;},pause:setPaused,startSource:function(source){var r=streams.get(canonical(source));if(r){r.disabled=false;start(r);}},stopSource:function(source){var r=streams.get(canonical(source));if(r){r.disabled=true;stop(r);}}};
+  window.MONITOR={mount:mount,getImage:image,ensureSource:ensureSource,sourceState:sourceState,openSource:function(source){var record=streams.get(canonical(source));if(record)openPreview(record);return !!record;},paused:function(){return paused;},pause:setPaused,startSource:function(source){var r=streams.get(canonical(source));if(r){r.disabled=false;start(r);}},stopSource:function(source){var r=streams.get(canonical(source));if(r){r.disabled=true;stop(r);}}};
 })();

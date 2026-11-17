@@ -19,11 +19,12 @@
         return;
       }
       sel.innerHTML = list.map(function (c) {
-        return '<option value="' + A.esc(c.path) + '">' + A.esc(ckptLabel(c.path)) + "</option>";
+        return '<option value="' + A.esc(c.path) + '" data-policy-type="' + A.esc(c.policy_type || '') + '">' + A.esc(ckptLabel(c.path)) + "</option>";
       }).join("");
       var want = String(preferred || "").trim();
       var hit = list.filter(function (c) { return c.path === want; })[0];
       sel.value = hit ? want : list[0].path;
+      syncFlowControls();
     } catch (e) {
       sel.innerHTML = '<option value="">检查点读取失败</option>';
     }
@@ -40,27 +41,31 @@
   var waybillBusy = false;
   var lastAnnouncedCount = -1;
 
-  function populateWaybillCameras(cameras) {
+  function populateWaybillCameras(cameras, preferred) {
     var sel = A.el("waybillCamSelect");
     if (!sel) return;
-    var cur = sel.value || "all";
+    var cur = preferred || sel.value || "all";
+    var legacy = (cameras || []).find(function(c){return String(c.name) === cur;});
+    if (legacy && !(cameras || []).some(function(c){return String(c.index_or_path)===cur;})) cur = String(legacy.index_or_path);
     var opts = ['<option value="all">全部已配置相机（自动轮询）</option>'];
     (cameras || []).forEach(function (c) {
       var name = String(c.name || c.index_or_path || "");
       var src = String(c.index_or_path !== undefined ? c.index_or_path : "");
-      opts.push('<option value="' + A.esc(name || src) + '">' +
+      opts.push('<option value="' + A.esc(src) + '">' +
         A.esc(name + (src ? " (" + src + ")" : "")) + "</option>");
     });
     sel.innerHTML = opts.join("");
     if (Array.from(sel.options).some(function (o) { return o.value === cur; })) {
       sel.value = cur;
     } else {
-      sel.value = "all";
+      var stale = document.createElement('option');stale.value=cur;stale.textContent='已选相机已移除：'+cur;sel.appendChild(stale);sel.value=cur;
     }
   }
 
   function renderWaybillState(data, isManual) {
     if (!data) return;
+    if(data.processing){A.el('waybillScanState').textContent=data.message||'扫码识别正在进行，采集继续运行';return;}
+    if(data.error)A.el('waybillScanState').textContent='扫码暂不可用：'+data.error;
     var banner = A.el("waybillBanner");
     var labelEl = A.el("waybillBannerLabel");
     var codeEl = A.el("waybillBannerCode");
@@ -123,6 +128,13 @@
       stateEl.textContent = "自动扫码中：" + camSummary + " · 已自动保存 " + totalCount + " 个单号";
     }
 
+    var previewGrid = A.el("waybillPreviewGrid");
+    if (previewGrid && data.scanned_cameras && data.scanned_cameras.length) {
+      A.renderWaybillPreview(previewGrid, data.scanned_cameras, {
+        foundHint: "已识别快递单号并写入文件"
+      });
+    }
+
     var newCodes = data.new_codes || [];
     if (newCodes.length && totalCount !== lastAnnouncedCount) {
       lastAnnouncedCount = totalCount;
@@ -149,9 +161,10 @@
     try {
       var camSel = A.el("waybillCamSelect");
       var cam = (camSel && camSel.value) || "all";
-      var r = await A.api.post("/api/waybill/scan", { camera: cam, save: true });
+      var r = await A.api.post("/api/waybill/scan", { camera: cam, save: true, include_preview: false });
       renderWaybillState(r, isManual);
     } catch (e) {
+      A.el('waybillScanState').textContent='扫码失败：'+e.message;
       if (isManual) A.toast("扫描失败：" + e.message, "err");
     } finally {
       waybillBusy = false;
@@ -205,11 +218,14 @@
     var autoIdle = A.el("chkIdleScanWaybill") ? A.el("chkIdleScanWaybill").checked : true;
     var st = A.status();
     var isEvalRunning = Boolean(st && st.running && st.job && (st.job.kind === "eval" || st.job.kind === "record"));
-    if ((isEvalRunning && autoEval) || autoIdle) {
+    if (isEvalRunning ? autoEval : autoIdle) {
       scanWaybillOnce(false);
     }
   }, 1200);
-  window.addEventListener("pagehide", function () { clearInterval(waybillTimer); });
+  window.addEventListener("pagehide", function () {
+    clearInterval(waybillTimer);
+    A.stopWaybillPreview(A.el("waybillPreviewGrid"));
+  });
 
   function syncEvalModeUI() {
     var chk = A.el("chkContinuousSort");
@@ -220,17 +236,64 @@
     if (contRow) contRow.style.opacity = isCont ? "1" : "0.5";
     if (fixedRow) fixedRow.style.opacity = isCont ? "0.55" : "1";
     if (btn) btn.textContent = isCont ? "开始持续分拣" : "开始评估";
+    syncFlowControls();
+    renderInferenceMode(A.status());
   }
+
+  function syncFlowControls() {
+    var select = A.q('#evalForm [name="policy_path"]');
+    var option = select && select.selectedOptions[0];
+    var type = option && option.dataset.policyType;
+    var field = A.q('#evalForm [name="flow_matching_steps"]');
+    var hint = A.el('flowSamplerHint');
+    if (!field) return;
+    field.disabled = false;
+    field.readOnly = type === 'act';
+    if (type === 'act') field.value = '0';
+    if (hint) hint.textContent = type === 'act' ? 'ACT没有Flow Matching采样器，此项不适用。' :
+      'SmolVLA使用Flow Matching生成动作块；0沿用检查点，次数越高通常越慢。';
+  }
+  A.q('#evalForm [name="policy_path"]').addEventListener('change', syncFlowControls);
+
+  function renderInferenceMode(status) {
+    var node = A.el('evalInferenceMode');
+    if (!node) return;
+    var job = status && status.job;
+    if (status && status.running && job && job.kind === 'eval') {
+      var label = job.policy_type === 'smolvla' ? 'SmolVLA' : (job.policy_type === 'act' ? 'ACT' : '策略');
+      var details = job.inference_details;
+      if (job.inference_mode === 'async_policy' && details) {
+        node.textContent = '本次任务：' + label + ' · n_action_steps=' + details.action_chunk_steps +
+          ' / chunk_size=' + details.model_chunk_size +
+          (details.policy_type === 'smolvla' ? ' · Flow Matching ' + details.flow_matching_steps + '次' : '') +
+          ' · Async独立进程';
+        return;
+      }
+      node.textContent = job.inference_mode === 'async_policy' ? '本次任务：' + label + ' 独立进程异步推理' :
+        (job.inference_mode === 'synchronous' ? '本次任务：同步推理；修改异步选项将在下次启动生效' : '本次任务的推理模式请查看启动日志');
+      return;
+    }
+    var input = A.q('#evalForm [name="async_inference"]');
+    node.textContent = input && input.checked ? '下次启动：按所选 ACT / SmolVLA 模型使用独立进程异步推理' : '下次启动：同步推理（异步未开启）';
+  }
+  A.onStatus(renderInferenceMode);
+  A.q('#evalForm [name="async_inference"]').addEventListener('change', function () { renderInferenceMode(A.status()); });
 
   if (A.el("chkContinuousSort")) {
     A.el("chkContinuousSort").addEventListener("change", syncEvalModeUI);
   }
 
+  function evalFormConfig(settings) {
+    var values = Object.assign({ continuous_sort: true, idle_stop_s: 8, max_sort_time_s: 600, flow_matching_steps: 0 }, settings || {});
+    if (values.n_action_steps === undefined) values.n_action_steps = values.async_chunk_size || 0;
+    return values;
+  }
+
   async function loadConfig() {
     try {
       var c = await A.api.get("/api/config");
-      populateWaybillCameras(c.cameras || []);
-      var evCfg = Object.assign({ continuous_sort: true, idle_stop_s: 8, max_sort_time_s: 600 }, c.eval || {});
+      populateWaybillCameras(c.cameras || [], ((c.ui_preferences || {}).eval || {}).waybillCamSelect);
+      var evCfg = evalFormConfig(c.eval);
       A.fillForm(A.el("evalForm"), evCfg);
       syncEvalModeUI();
       var repo = A.q('#evalForm [name="repo_id"]');
@@ -283,9 +346,13 @@
         repoInput.value = evalRepoDefault();
         A.toast("评估数据集自动命名为 " + repoInput.value, "info");
       }
-      await A.saveConfig({ eval: A.formData(form) });
-      await A.api.post("/api/eval", {});
-      A.ok("评估任务已启动", "#evalAlert");
+      var selected = A.formData(form);
+      await A.autosave.flush();
+      await A.saveConfig({ eval: selected });
+      var started = await A.api.post("/api/eval", { eval: selected });
+      var policyLabel = started.policy_type === 'smolvla' ? 'SmolVLA' : (started.policy_type === 'act' ? 'ACT' : '策略');
+      A.ok(started.inference_mode === 'async_policy' ? policyLabel + ' 异步评估任务已启动' :
+        (started.inference_mode === 'synchronous' ? '同步评估任务已启动' : '评估任务已启动，执行模式见启动日志'), "#evalAlert");
       A.refreshStatus();
     }, "#evalAlert");
   });
@@ -306,7 +373,7 @@
   await loadWaybillHistory();
   var evalFormBinding = A.autosave.form('evalForm', 'eval', {
     apply: function (cfg) {
-      A.fillForm(A.el('evalForm'), (cfg && cfg.eval) || cfg || {});
+      A.fillForm(A.el('evalForm'), evalFormConfig((cfg && cfg.eval) || cfg));
       syncEvalModeUI();
     }
   });

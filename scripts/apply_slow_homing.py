@@ -31,6 +31,25 @@ def main():
         subprocess.run(command+['--dry-run'],cwd=cwd,check=True)
         subprocess.run(command,cwd=cwd,check=True)
         print('[补丁] 慢速归零更新完成：'+str(target),flush=True)
+    # Keep standalone lerobot-teleoperate/record cleanup consistent with Web.
+    paired=pkg/'bi_seeed_b601_dm_follower.py'
+    if not paired.is_file():raise RuntimeError('缺少双臂 B601 插件源码')
+    if 'Coordinated parallel shutdown' not in paired.read_text():
+        apply_patch(pkg.parent,'parallel_shutdown.patch')
+    elif '_coordinated_shutdown' not in (pkg/'seeed_b601_follower.py').read_text():
+        raise RuntimeError('双臂补丁不完整，请检查从臂驱动的同步收工检查')
+    shutil.copy2(root/'backend/coordinated_shutdown.py',pkg/'coordinated_shutdown.py')
+    # Refresh shared limits even when the original slow-homing patch is present.
+    # Otherwise existing installations silently keep the old slower profile.
+    for target in (pkg/'homing_profile.py',
+            root/'rebot_grasp/sdk/reBotArm_control_py/reBotArm_control_py/controllers/homing_profile.py'):
+        shutil.copy2(root/'backend/homing_profile.py',target)
+    sdk=root/'rebot_grasp/sdk/reBotArm_control_py/reBotArm_control_py/controllers/rebotarm_endpose_controller.py'
+    text=sdk.read_text()
+    text=text.replace('def safe_home(self,max_vel=.15,','def safe_home(self,max_vel=.20,')
+    text=text.replace('max_vel=min(max_vel,.15)','max_vel=min(max_vel,.20)')
+    if text!=sdk.read_text():sdk.write_text(text)
+    print('[补丁] 双臂并行收工及阶段同步已安装',flush=True)
 
 
 if __name__=='__main__':main()

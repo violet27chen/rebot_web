@@ -1,0 +1,5 @@
+# TRAINING machine only. Python 3.12+. Use a NEW environment, not robot control.
+# ALTERNATE LeRobot-native format. Current upstream Wall-X workflow: NATIVE_WALLX.md.
+# Source commit is pinned; record resolved transitive versions after installation.
+-r requirements-common.txt
+lerobot[wall_oss_05,training,peft] @ git+https://github.com/huggingface/lerobot.git@7910c20a75834ad3fa6a9792df4d44a614d1bba6

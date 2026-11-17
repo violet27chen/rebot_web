@@ -1,0 +1,11 @@
+# Python 3.12 / Ubuntu. Install into the role-specific environment.
+# CUDA Torch wheels: install the NVIDIA-compatible Torch build before this list.
+lerobot==0.4.4
+torch==2.7.1
+torchvision==0.22.1
+numpy==2.2.6
+av==15.1.0
+opencv-python==5.0.0.93
+motorbridge==0.5.6
+motorbridge-smart-servo==0.0.4
+PyYAML==6.0.3

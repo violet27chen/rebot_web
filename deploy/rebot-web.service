@@ -1,0 +1,26 @@
+[Unit]
+Description=reBot control platform and shared vision services
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+WorkingDirectory=/home/legion/rebot_web
+Environment=PYTHONUNBUFFERED=1
+Environment=WEB_HOST=0.0.0.0
+Environment=WEB_PORT=8000
+Environment=PATH=/home/legion/miniconda3/envs/lerobot/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/legion/miniconda3/envs/lerobot/bin/python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 5
+ExecStop=/home/legion/miniconda3/envs/lerobot/bin/python /home/legion/rebot_web/scripts/stop_service.py --url http://127.0.0.1:8000 --timeout 1700
+Restart=on-failure
+RestartSec=3
+KillSignal=SIGINT
+KillMode=mixed
+TimeoutStopSec=30
+SendSIGKILL=yes
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rebot-web
+
+[Install]
+WantedBy=default.target

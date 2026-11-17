@@ -13,7 +13,7 @@
       if(!ports.every(Boolean))throw new Error('请先配置从臂串口');
       var status=await A.api.get('/api/status'),job=status.running?status.job:null;
       if(job&&job.kind!=='eval')throw new Error('当前运行的是其他任务，未停止任务或发送归零指令');
-      if(!await A.confirm('目标：'+ports.join('、')+'\n'+(job?'先结束当前策略评估并等待串口释放，再':'即将')+'从实测当前位置慢速归零，到位后失能并释放串口。\n请确认回零路径无障碍、机械臂有支撑、夹爪内没有包裹。',{title:'确认一键收工归零并失能'}))return false;
+      if(!await A.confirm('目标：'+ports.join('、')+'\n'+(job?'先结束当前策略评估并等待串口释放，再':'即将')+'从实测当前位置慢速归零，到位后失能并释放串口。\n'+(dual?'双臂同时收回，每阶段按较远一侧的耗时同步，全部到位后失能。\n':'')+'请确认回零路径无障碍、机械臂有支撑、夹爪内没有包裹。',{title:'确认一键收工归零并失能'}))return false;
       var fresh=await A.api.get('/api/status');
       if(fresh.running&&(!job||fresh.job.job_id!==job.job_id||fresh.job.kind!=='eval'))throw new Error('当前任务已变化，请重新确认收工');
       if(fresh.running){
@@ -96,7 +96,7 @@
       var cfg=await A.api.get('/api/config'), dual=!!(cfg.dual_arm||{}).enabled;
       var ports=dual?['left','right'].map(function(side){return (cfg.dual_arm[side]||{}).follower_port||'';}):[(cfg.follower||{}).port||''];
       if(!ports.every(Boolean))throw new Error('请先配置从臂串口');
-      if(!await A.confirm('目标：'+ports.join('、')+'\n即将低速回到既有零位，确认到位后失能并释放串口。\n请确认回零路径无障碍，机械臂归零后有支撑，夹爪内没有包裹。\n此操作不会改写零点。',{title:'确认收工归零并失能'}))return;
+      if(!await A.confirm('目标：'+ports.join('、')+'\n即将低速回到既有零位，确认到位后失能并释放串口。\n'+(dual?'双臂同时收回，每阶段按较远一侧的耗时同步，全部到位后失能。\n':'')+'请确认回零路径无障碍，机械臂归零后有支撑，夹爪内没有包裹。\n此操作不会改写零点。',{title:'确认收工归零并失能'}))return;
       homingRequest=true;update(current);
       try{
         if(window.WORKSPACE)await window.WORKSPACE.flush();

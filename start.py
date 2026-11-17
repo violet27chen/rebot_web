@@ -1,28 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-单入口启动器 —— 前后端一起起，不需要分开启动。
-
-    python start.py                      # 标准启动（仅本机 127.0.0.1 访问）
-    python start.py --lan                # 局域网模式：监听 0.0.0.0，并打印可访问的局域网 IP
-    python start.py --host 0.0.0.0       # 同上，手动指定监听地址
-    python start.py --no-chmod           # 跳过启动时的串口检查 / 授权（不推荐）
-    python start.py --no-browser         # 不自动打开浏览器
-    start_windows.bat                    # Windows 双击启动（自动 chcp 65001）
-
-启动顺序：
-  1) 多源回退补齐 Web 依赖（清华 → 阿里 → 官方，带超时，不会卡住）
-  2) 串口准备，按平台区分：
-       Ubuntu  : 提示 sudo 密码，执行 chmod 666 /dev/ttyUSB* /dev/ttyACM*；
-                 密码只经 stdin 传给 sudo，不回显、不记录、不落盘。
-       Windows : 只扫描 COM 端口并打印结果（无需 sudo / chmod），
-                 端口由设备驱动提供，在设备管理器确认编号与驱动。
-     失败会给出明确的手动命令，但不会阻塞网页服务启动。
-  3) 启动 FastAPI，前端多页面由后端同端口提供
-  4) 自动打开浏览器
-
-Windows 与 Ubuntu 均可在本机运行平台和硬件控制；Windows 通过设备驱动提供的 COM 端口访问机械臂，无需 sudo / chmod。
-"""
 from __future__ import annotations
 
 import argparse

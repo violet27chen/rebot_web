@@ -12,7 +12,7 @@
     });
     try {
       var c = await A.api.get("/api/config");
-      populateDsWaybillCameras(c.cameras || []);
+      populateDsWaybillCameras(c.cameras || [], ((c.ui_preferences || {}).dataset || {}).dsWaybillCamSelect);
       A.fillForm(f, c.dataset);
       A.el("vizRepo").value = c.viz.repo_id || c.dataset.repo_id || "";
       A.el("vizEp").value = c.viz.episode_index || 0;
@@ -28,22 +28,24 @@
   var dsSessionCodes = new Set();
   var dsLatestWaybill = null;
 
-  function populateDsWaybillCameras(cameras) {
+  function populateDsWaybillCameras(cameras, preferred) {
     var sel = A.el("dsWaybillCamSelect");
     if (!sel) return;
-    var cur = sel.value || "all";
+    var cur = preferred || sel.value || "all";
+    var legacy = (cameras || []).find(function(c){return String(c.name) === cur;});
+    if (legacy && !(cameras || []).some(function(c){return String(c.index_or_path)===cur;})) cur = String(legacy.index_or_path);
     var opts = ['<option value="all">全部已配置相机（自动轮询）</option>'];
     (cameras || []).forEach(function (c) {
       var name = String(c.name || c.index_or_path || "");
       var src = String(c.index_or_path !== undefined ? c.index_or_path : "");
-      opts.push('<option value="' + A.esc(name || src) + '">' +
+      opts.push('<option value="' + A.esc(src) + '">' +
         A.esc(name + (src ? " (" + src + ")" : "")) + "</option>");
     });
     sel.innerHTML = opts.join("");
     if (Array.from(sel.options).some(function (o) { return o.value === cur; })) {
       sel.value = cur;
     } else {
-      sel.value = "all";
+      var stale = document.createElement('option');stale.value=cur;stale.textContent='已选相机已移除：'+cur;sel.appendChild(stale);sel.value=cur;
     }
   }
 
@@ -76,6 +78,8 @@
 
   function renderDsWaybillState(data, isManual) {
     if (!data) return;
+    if(data.processing){A.el('dsWaybillScanState').textContent=data.message||'扫码识别正在进行，采集继续运行';return;}
+    if(data.error)A.el('dsWaybillScanState').textContent='扫码暂不可用：'+data.error;
     var codes = data.codes || [];
     var addedNew = false;
     codes.forEach(function (c) {
@@ -147,6 +151,14 @@
       stateEl.textContent = "自动扫码中：" + camSummary + " · 本轮已扫 " + count + " 个（采集不落盘）";
     }
 
+    var dsPreviewGrid = A.el("dsWaybillPreviewGrid");
+    if (dsPreviewGrid && data.scanned_cameras && data.scanned_cameras.length) {
+      A.renderWaybillPreview(dsPreviewGrid, data.scanned_cameras, {
+        compact: true,
+        foundHint: "已识别快递单号（采集模式不保存单号）"
+      });
+    }
+
     updateModalWaybillUI();
 
     if (addedNew) {
@@ -175,9 +187,10 @@
       var camSel = A.el("dsWaybillCamSelect");
       var cam = (camSel && camSel.value) || "all";
       /* 采集页面传 save: false，只识别不保存快递单号 */
-      var r = await A.api.post("/api/waybill/scan", { camera: cam, save: false });
+      var r = await A.api.post("/api/waybill/scan", { camera: cam, save: false, include_preview: false });
       renderDsWaybillState(r, isManual);
     } catch (e) {
+      A.el('dsWaybillScanState').textContent='扫码失败：'+e.message;
       if (isManual) A.toast("扫描失败：" + e.message, "err");
     } finally {
       dsWaybillBusy = false;
@@ -206,12 +219,54 @@
     var autoIdle = A.el("chkDsIdleScanWaybill") ? A.el("chkDsIdleScanWaybill").checked : true;
     var st = A.status();
     var isRunning = Boolean(recModal.active || (st && st.running && st.job && st.job.kind === "record"));
-    if ((isRunning && autoRec) || autoIdle) {
+    if (recModal.active && ["preparing_next", "saving", "reset", "closing"].includes(recModal.phase)) {
+      A.el("dsWaybillScanState").textContent = "剧集切换 / 保存中，自动扫码暂缓；不等待扫到单号";
+      return;
+    }
+    if (isRunning ? autoRec : autoIdle) {
       scanDsWaybillOnce(false);
     }
   }, 1200);
 
   var cachedDatasets = [];
+  var selectedRepoIds = new Set();
+
+  function updateBatchBar() {
+    var count = selectedRepoIds.size;
+    var total = cachedDatasets.length;
+    var lbl = A.el("dsSelectedCount");
+    if (lbl) {
+      lbl.textContent = count > 0 ? ("已选择 " + count + " 项" + (total > 0 ? "（共 " + total + " 项）" : "")) : "已选择 0 项";
+    }
+    var btnMerge = A.el("btnBatchMerge");
+    if (btnMerge) btnMerge.disabled = (count < 2);
+    var btnExpAll = A.el("btnBatchExportAll");
+    if (btnExpAll) btnExpAll.disabled = (count === 0);
+    var btnExpVid = A.el("btnBatchExportVid");
+    if (btnExpVid) btnExpVid.disabled = (count === 0);
+    var btnDel = A.el("btnBatchDelete");
+    if (btnDel) btnDel.disabled = (count === 0);
+    var btnClr = A.el("btnBatchDeselect");
+    if (btnClr) btnClr.style.display = count > 0 ? "" : "none";
+
+    var allChk = A.el("dsSelectAll");
+    if (allChk) {
+      allChk.checked = (total > 0 && count === total);
+      allChk.indeterminate = (count > 0 && count < total);
+    }
+  }
+
+  function syncSelectionUI() {
+    A.qa("#dsTable tbody tr").forEach(function (tr) {
+      var chk = tr.querySelector(".ds-row-chk");
+      if (chk) {
+        var isChecked = selectedRepoIds.has(chk.value);
+        chk.checked = isChecked;
+        tr.classList.toggle("is-selected", isChecked);
+      }
+    });
+    updateBatchBar();
+  }
 
   function triggerDatasetExport(repoId, mode) {
     var rid = String(repoId || "").trim();
@@ -234,11 +289,78 @@
     A.ok("正在打包下载数据集 " + rid + "（" + (mode === "videos" ? "仅视频 MP4" : "完整数据+视频") + "）", "#dsAlert");
   }
 
+  function triggerBatchExport(mode) {
+    var ids = Array.from(selectedRepoIds);
+    if (!ids.length) {
+      A.toast("请先勾选要导出的数据集", "warn");
+      return;
+    }
+    var url = "/api/dataset/export?repo_ids=" + encodeURIComponent(ids.join(",")) + "&mode=" + encodeURIComponent(mode || "all");
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = "batch_" + ids.length + "_datasets_" + (mode === "videos" ? "videos.zip" : "full.zip");
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    A.ok("正在打包下载选中的 " + ids.length + " 个数据集（" + (mode === "videos" ? "仅视频 MP4" : "完整数据+视频") + "）", "#dsAlert");
+  }
+
   if (A.el("btnExportCurrentAll")) {
     A.click("btnExportCurrentAll", function () { triggerDatasetExport("", "all"); });
   }
   if (A.el("btnExportCurrentVid")) {
     A.click("btnExportCurrentVid", function () { triggerDatasetExport("", "videos"); });
+  }
+
+  if (A.el("btnBatchExportAll")) {
+    A.click("btnBatchExportAll", function () { triggerBatchExport("all"); });
+  }
+  if (A.el("btnBatchExportVid")) {
+    A.click("btnBatchExportVid", function () { triggerBatchExport("videos"); });
+  }
+
+  if (A.el("btnBatchDeselect")) {
+    A.click("btnBatchDeselect", function () {
+      selectedRepoIds.clear();
+      syncSelectionUI();
+    });
+  }
+
+  if (A.el("btnBatchDelete")) {
+    A.click("btnBatchDelete", async function () {
+      var ids = Array.from(selectedRepoIds);
+      if (!ids.length) {
+        A.toast("请先勾选要删除的数据集", "warn");
+        return;
+      }
+      var confirmMsg = "确认永久删除选中的 " + ids.length + " 个数据集？此操作不可撤销。\n\n" +
+        ids.slice(0, 8).join("\n") + (ids.length > 8 ? "\n...等共 " + ids.length + " 个" : "");
+      if (!(await A.confirm(confirmMsg, { title: "批量删除数据集" }))) return;
+      A.action(async function () {
+        var r = await A.api.post("/api/datasets/batch-delete", { repo_ids: ids, confirm: true });
+        var deletedCount = (r.deleted || []).length;
+        var failedList = r.failed || [];
+        if (failedList.length > 0) {
+          A.toast("已删除 " + deletedCount + " 个，失败 " + failedList.length + " 个", "warn");
+        } else {
+          A.ok("成功批量删除 " + deletedCount + " 个数据集", "#dsAlert");
+        }
+        selectedRepoIds.clear();
+        await loadDatasets(true);
+      }, "#dsAlert");
+    });
+  }
+
+  var dsSelectAll = A.el("dsSelectAll");
+  if (dsSelectAll) {
+    dsSelectAll.addEventListener("change", function () {
+      if (dsSelectAll.checked) {
+        cachedDatasets.forEach(function (d) { if (d.repo_id) selectedRepoIds.add(d.repo_id); });
+      } else {
+        selectedRepoIds.clear();
+      }
+      syncSelectionUI();
+    });
   }
 
   async function loadDatasets(quiet) {
@@ -251,26 +373,59 @@
     try {
       var r = await A.api.get("/api/datasets");
       cachedDatasets = r.datasets || [];
+      // 清理已不存在的数据集 ID
+      var validIds = new Set(cachedDatasets.map(function (d) { return d.repo_id; }));
+      Array.from(selectedRepoIds).forEach(function (id) {
+        if (!validIds.has(id)) selectedRepoIds.delete(id);
+      });
+
       A.el("dsRoot").textContent = "目录 " + r.root;
       if (!r.datasets.length) {
+        selectedRepoIds.clear();
+        updateBatchBar();
         A.loadEmpty(body, "数据集目录为空",
           "请先点「开始采集」录制数据，或刷新列表重试", function () { loadDatasets(true); });
         if (!quiet) A.ok("数据集列表已刷新（暂无数据）");
         return;
       }
       body.innerHTML = r.datasets.map(function (d) {
-            return "<tr><td><code>" + A.esc(d.repo_id) + "</code></td><td>" +
-              A.esc(d.episodes) + "</td><td>" + A.esc(d.size_mb) + " MB</td><td class=\"muted\">" +
-              A.esc(d.path) + "</td><td><div class=\"actions\">" +
-              '<button class="btn sm primary" data-view="' + A.esc(d.repo_id) + '">网页查看</button>' +
-              '<button class="btn sm subtle" data-export-all="' + A.esc(d.repo_id) + '">导出数据+视频</button>' +
-              '<button class="btn sm subtle" data-export-vid="' + A.esc(d.repo_id) + '">仅导出视频</button>' +
-              '<button class="btn sm subtle" data-viz="' + A.esc(d.repo_id) + '">可视化</button>' +
-              '<button class="btn sm" data-replay="' + A.esc(d.repo_id) + '">回放</button>' +
-              '<button class="btn sm" data-fill="' + A.esc(d.path) + '">用作训练目录</button>' +
-              '<button class="btn sm danger" data-del="' + A.esc(d.repo_id) + '">删除</button>' +
-              "</div></td></tr>";
-        }).join("");
+        var isChecked = selectedRepoIds.has(d.repo_id);
+        return "<tr class=\"" + (isChecked ? "is-selected" : "") + "\" data-rid=\"" + A.esc(d.repo_id) + "\">" +
+          "<td style=\"text-align:center\"><input type=\"checkbox\" class=\"ds-row-chk\" value=\"" + A.esc(d.repo_id) + "\"" + (isChecked ? " checked" : "") + " aria-label=\"选择 " + A.esc(d.repo_id) + "\"></td>" +
+          "<td><code>" + A.esc(d.repo_id) + "</code></td><td>" +
+          A.esc(d.episodes) + "</td><td>" + A.esc(d.size_mb) + " MB" +
+          (d.storage ? '<div class="hint">视频 ' + A.esc(d.storage.videos_mb) + ' MB · 临时帧 ' + A.esc(d.storage.images_mb) + ' MB</div>' : '') + "</td><td class=\"muted\">" +
+          A.esc(d.path) + "</td><td><div class=\"actions\">" +
+          '<button class="btn sm primary" data-view="' + A.esc(d.repo_id) + '">网页查看</button>' +
+          '<button class="btn sm subtle" data-export-all="' + A.esc(d.repo_id) + '">导出数据+视频</button>' +
+          '<button class="btn sm subtle" data-export-vid="' + A.esc(d.repo_id) + '">仅导出视频</button>' +
+          '<button class="btn sm subtle" data-viz="' + A.esc(d.repo_id) + '">可视化</button>' +
+          '<button class="btn sm" data-replay="' + A.esc(d.repo_id) + '">回放</button>' +
+          '<button class="btn sm" data-fill="' + A.esc(d.path) + '">用作训练目录</button>' +
+          '<button class="btn sm danger" data-del="' + A.esc(d.repo_id) + '">删除</button>' +
+          "</div></td></tr>";
+      }).join("");
+
+      A.qa("#dsTable .ds-row-chk").forEach(function (chk) {
+        chk.addEventListener("change", function () {
+          if (chk.checked) selectedRepoIds.add(chk.value);
+          else selectedRepoIds.delete(chk.value);
+          var tr = chk.closest("tr");
+          if (tr) tr.classList.toggle("is-selected", chk.checked);
+          updateBatchBar();
+        });
+      });
+
+      A.qa("#dsTable tbody tr").forEach(function (tr) {
+        tr.addEventListener("click", function (e) {
+          if (e.target.closest("button") || e.target.closest("a") || e.target.closest("input")) return;
+          var chk = tr.querySelector(".ds-row-chk");
+          if (chk) {
+            chk.checked = !chk.checked;
+            chk.dispatchEvent(new Event("change"));
+          }
+        });
+      });
 
       A.qa("#dsTable [data-view]").forEach(function (b) {
         b.addEventListener("click", function () {
@@ -320,11 +475,13 @@
           A.action(async function () {
             if (!(await A.confirm("确认永久删除数据集「" + b.dataset.del + "」？此操作不可撤销。", { title: "删除数据集" }))) return;
             await A.api.del("/api/datasets/" + b.dataset.del + "?confirm=true");
+            selectedRepoIds.delete(b.dataset.del);
             A.ok("数据集已删除", "#dsAlert");
             await loadDatasets(true);
           }, "#dsAlert");
         };
       });
+      updateBatchBar();
       if (!quiet) A.ok("数据集列表已刷新");
     } catch (e) {
       A.loadError(body, e, function () { loadDatasets(true); });
@@ -339,6 +496,8 @@
     mask: null, tickTimer: null, active: false,
     numEpisodes: 1, epTimeS: 30, resetTimeS: 10, repoId: "",
     curEp: 1, firstRawEp: null,
+    jobId: "", jobStartedAt: 0, sequence: -1, authoritative: false, rawEp: null, rerecord: false,
+    hasStarted: false, startupError: "",
     phase: "init", /* init | recording | reset | preparing_next | saving */
     phaseStartMs: 0, sessionStartMs: 0, lastLog: ""
   };
@@ -354,7 +513,8 @@
     recModal.repoId = (f && f.elements.repo_id && f.elements.repo_id.value) || "";
     recModal.numEpisodes = Math.max(1, Number((f && f.elements.num_episodes && f.elements.num_episodes.value) || 1));
     recModal.epTimeS = Math.max(1, Number((f && f.elements.episode_time_s && f.elements.episode_time_s.value) || 30));
-    recModal.resetTimeS = Math.max(0, Number((f && f.elements.reset_time_s && f.elements.reset_time_s.value) || 10));
+    var reset = f && f.elements.reset_time_s && f.elements.reset_time_s.value;
+    recModal.resetTimeS = Math.max(0, Number(reset === "" || reset == null ? 10 : reset));
   }
 
   function ensureRecordModal() {
@@ -418,11 +578,6 @@
         var k = b.getAttribute("data-rec-key");
         try {
           await A.api.post("/api/record/key", { key: k });
-          if (k === "right" && recModal.phase === "reset") {
-            recModal.phase = recModal.curEp < recModal.numEpisodes ? "preparing_next" : "saving";
-            recModal.phaseStartMs = Date.now();
-            updateRecordModalUI();
-          }
           A.toast("已发送按键 " + k.toUpperCase(), "ok");
         } catch (e) { A.toast(e.message, "err"); }
       });
@@ -432,8 +587,6 @@
       var btn = mask.querySelector("#recModalStop");
       btn.disabled = true;
       btn.textContent = "正在停止并保存…";
-      recModal.phase = "saving";
-      updateRecordModalUI();
       try {
         var s = A.status();
         var j = (s && s.job) || {};
@@ -456,38 +609,10 @@
   function updateRecordModalUI() {
     var mask = recModal.mask;
     if (!mask || !recModal.active) return;
-    var now = Date.now();
+    var now = performance.now();
     var elapsedPhase = (now - recModal.phaseStartMs) / 1000;
-
-    /* 阶段切换规则：
-       1. init（启动准备中）：不倒计时，直到收到真实 "Recording episode" 日志才进入 recording；
-       2. recording（录制倒计时）：单集时间到后，若还有下一集且 resetTimeS > 0 则进入 reset，否则进入 preparing_next / saving；
-       3. reset（重置等待倒计时）：等待时间结束后，绝不提前抢跑下一集倒计时，而是进入 preparing_next 显示「准备中…」，直到收到下一集真实 "Recording episode" 日志才开始采集倒计时。 */
-    if (recModal.phase === "recording" && elapsedPhase >= recModal.epTimeS) {
-      if (recModal.curEp < recModal.numEpisodes && recModal.resetTimeS > 0) {
-        recModal.phase = "reset";
-        recModal.phaseStartMs = now;
-        elapsedPhase = 0;
-      } else if (recModal.curEp < recModal.numEpisodes) {
-        recModal.phase = "preparing_next";
-        recModal.phaseStartMs = now;
-        elapsedPhase = 0;
-      } else {
-        recModal.phase = "saving";
-        recModal.phaseStartMs = now;
-        elapsedPhase = 0;
-      }
-    } else if (recModal.phase === "reset" && elapsedPhase >= recModal.resetTimeS) {
-      if (recModal.curEp < recModal.numEpisodes) {
-        recModal.phase = "preparing_next";
-        recModal.phaseStartMs = now;
-        elapsedPhase = 0;
-      } else {
-        recModal.phase = "saving";
-        recModal.phaseStartMs = now;
-        elapsedPhase = 0;
-      }
-    }
+    // Rendering never advances the recorder. Zero means waiting for its next
+    // actual phase event, not starting another countdown speculatively.
 
     var badge = mask.querySelector("#recModalBadge");
     var epInfo = mask.querySelector("#recModalEpInfo");
@@ -501,9 +626,7 @@
     var bar = mask.querySelector("#recModalBar");
     var hint = mask.querySelector("#recModalHint");
 
-    var displayEp = recModal.phase === "preparing_next"
-      ? Math.min(recModal.numEpisodes, recModal.curEp + 1)
-      : recModal.curEp;
+    var displayEp = recModal.curEp;
     epInfo.textContent = "剧集 " + displayEp + " / " + recModal.numEpisodes +
       (recModal.repoId ? (" · " + recModal.repoId) : "");
 
@@ -529,22 +652,22 @@
     }
 
     if (recModal.phase === "preparing_next") {
-      var nextEp = Math.min(recModal.numEpisodes, recModal.curEp + 1);
-      badge.textContent = "准备中 · 即将开始第 " + nextEp + " 集";
+      var nextEp = recModal.curEp;
+      badge.textContent = "准备中 · 重录第 " + nextEp + " 集";
       badge.className = "badge warn";
       epRemain.textContent = "准备中…";
       epSub.textContent = "第 " + nextEp + " 集就绪后开始 " + recModal.epTimeS + "s 倒计时";
       resetRemain.textContent = "00:00";
-      resetSub.textContent = "重置时间已过，正在准备下一集";
+      resetSub.textContent = "正在准备重录当前集";
       boxEp.style.borderColor = "#f59e0b";
       boxEp.style.background = "rgba(245,158,11,0.08)";
       boxReset.style.borderColor = "var(--border,#e2e8f0)";
       boxReset.style.background = "transparent";
       bar.style.width = "100%";
-      var remEps = Math.max(1, recModal.numEpisodes - recModal.curEp);
+      var remEps = Math.max(1, recModal.numEpisodes - recModal.curEp + 1);
       var remSec = remEps * recModal.epTimeS + Math.max(0, remEps - 1) * recModal.resetTimeS;
       totalInfo.textContent = "正在准备第 " + nextEp + " 集 · 剩余约 " + fmtSec(remSec);
-      hint.textContent = "重置等待已结束，正在保存上一集并准备第 " + nextEp + " 集，真实开始采集后立即显示倒计时…";
+      hint.textContent = "等待采集进程实际开始重录，当前不提前倒计时。";
       return;
     }
 
@@ -562,7 +685,7 @@
       epSub.textContent = "单集时长 " + recModal.epTimeS + "s";
       resetRemain.textContent = recModal.curEp >= recModal.numEpisodes ? "无重置" : fmtSec(curResetLeft);
       resetSub.textContent = recModal.curEp >= recModal.numEpisodes ? "最后一集无重置" : ("重置时长 " + recModal.resetTimeS + "s");
-      hint.textContent = "请操作主臂完成动作示教；本集倒计时结束后将进入重置等待阶段。";
+      hint.textContent = curEpLeft > 0 ? "请操作主臂完成动作示教；阶段按采集进程的实际输出切换。" : "计划采集时间已到，等待采集进程结束本集；尚未开始重置倒计时。";
     } else if (recModal.phase === "reset") {
       curEpLeft = 0;
       curResetLeft = Math.max(0, recModal.resetTimeS - elapsedPhase);
@@ -573,26 +696,27 @@
       boxReset.style.borderColor = "#f59e0b";
       boxReset.style.background = "rgba(245,158,11,0.08)";
       pct = recModal.resetTimeS > 0 ? Math.min(100, Math.max(0, (elapsedPhase / recModal.resetTimeS) * 100)) : 100;
-      epRemain.textContent = "本集完成";
+      epRemain.textContent = "本集录制结束";
       epSub.textContent = "单集时长 " + recModal.epTimeS + "s";
       resetRemain.textContent = fmtSec(curResetLeft);
       resetSub.textContent = "重置时长 " + recModal.resetTimeS + "s（结束后进入下一集准备）";
-      hint.textContent = "请趁重置倒计时将桌面上的包裹恢复到初始位置；倒计时结束后将准备下一集。";
+      hint.textContent = curResetLeft > 0 ? "请将包裹恢复到初始位置；重置结束后保存当前集，再开始下一集。" : "重置时间已到，等待采集进程进入保存阶段。";
     } else {
       curEpLeft = 0;
       curResetLeft = 0;
-      badge.textContent = "正在保存并编码视频";
+      var startupAborted = recModal.phase === "closing" && !recModal.hasStarted;
+      badge.textContent = startupAborted ? (recModal.startupError ? "启动失败 · 正在清理设备" : "启动未完成 · 正在清理设备") : recModal.phase === "closing" ? "正在结束采集并收尾" : "正在保存第 " + recModal.curEp + " 集";
       badge.className = "badge";
       boxEp.style.borderColor = "var(--border,#e2e8f0)";
       boxEp.style.background = "transparent";
       boxReset.style.borderColor = "var(--border,#e2e8f0)";
       boxReset.style.background = "transparent";
-      pct = 100;
-      epRemain.textContent = "已完成";
-      epSub.textContent = "全部剧集录制完成";
-      resetRemain.textContent = "00:00";
-      resetSub.textContent = "正在编码保存";
-      hint.textContent = recModal.lastLog || "正在编码视频并安全收尾，完全结束后此窗口将自动关闭…";
+      pct = startupAborted ? 0 : 100;
+      epRemain.textContent = startupAborted ? "未开始采集" : recModal.phase === "closing" ? "采集已停止" : "保存中…";
+      epSub.textContent = startupAborted ? "尚未开始任何剧集，未计为采集完成" : recModal.phase === "closing" ? "等待保存和设备收工完成" : "当前集正在写盘、统计与编码";
+      resetRemain.textContent = startupAborted ? "未开始" : "00:00";
+      resetSub.textContent = startupAborted ? "等待设备清理完成" : "正在保存或收尾";
+      hint.textContent = recModal.startupError || recModal.lastLog || "正在编码视频并安全收尾，完全结束后此窗口将自动关闭…";
     }
 
     bar.style.width = pct.toFixed(1) + "%";
@@ -600,17 +724,26 @@
     var futureEps = Math.max(0, recModal.numEpisodes - recModal.curEp);
     var futureSec = futureEps * recModal.epTimeS + Math.max(0, futureEps - 1) * recModal.resetTimeS;
     var totalLeft = recModal.phase === "saving" ? 0 : (curEpLeft + curResetLeft + futureSec);
-    totalInfo.textContent = recModal.phase === "saving" ? "正在收尾保存…" : ("整个采集预计剩余 " + fmtSec(totalLeft));
+    if (recModal.phase === "closing") totalInfo.textContent = "正在收尾，等待采集进程结束…";
+    else if (recModal.phase === "saving") totalInfo.textContent = futureEps ? "保存当前集 · 尚有 " + futureEps + " 集，录制/重置约 " + fmtSec(futureSec) + "（不含保存耗时）" : "最后一集正在保存…";
+    else totalInfo.textContent = "录制/重置预计剩余 " + fmtSec(totalLeft) + "（不含保存耗时）";
   }
 
-  function openRecordModal() {
+  function openRecordModal(job) {
+    job = job || {};
+    var jobId = String(job.job_id || recModal.jobId || "");
+    if (recModal.active && jobId === recModal.jobId) return;
     readRecordParams();
+    recModal.jobId = jobId;
+    recModal.jobStartedAt = Number(job.started_at || 0);
+    recModal.authoritative = false; recModal.sequence = -1; recModal.rawEp = null; recModal.rerecord = false;
+    recModal.hasStarted = false; recModal.startupError = "";
     recModal.active = true;
     recModal.curEp = 1;
     recModal.firstRawEp = null;
     recModal.phase = "init";
-    recModal.phaseStartMs = Date.now();
-    recModal.sessionStartMs = Date.now();
+    recModal.phaseStartMs = performance.now();
+    recModal.sessionStartMs = performance.now();
     recModal.lastLog = "";
     ensureRecordModal();
     var btn = recModal.mask.querySelector("#recModalStop");
@@ -630,42 +763,74 @@
     recModal.mask = null;
   }
 
+  function syncRecordJob(job) {
+    if (!job || job.kind !== "record" || !job.job_id) return;
+    openRecordModal(job);
+    var progress = job.recording;
+    if (!progress || !Number.isInteger(progress.sequence) || !["init", "recording", "reset", "preparing_next", "saving", "closing"].includes(progress.phase)) return;
+    if (progress.sequence < recModal.sequence) return;
+    var samePhase = recModal.authoritative && progress.sequence === recModal.sequence;
+    var elapsed = Math.max(0, Number(progress.elapsed_s) || 0);
+    if (samePhase) elapsed = Math.max(elapsed, (performance.now() - recModal.phaseStartMs) / 1000);
+    recModal.phaseStartMs = performance.now() - elapsed * 1000;
+    recModal.phase = progress.phase;
+    recModal.sequence = progress.sequence;
+    recModal.authoritative = true;
+    recModal.curEp = progress.episode;
+    recModal.numEpisodes = progress.total;
+    recModal.epTimeS = progress.episode_time_s;
+    recModal.resetTimeS = progress.reset_time_s;
+    recModal.repoId = progress.repo_id;
+    recModal.hasStarted = progress.has_started !== undefined ? progress.has_started : progress.raw_episode != null || progress.phase === "recording" || recModal.hasStarted;
+    recModal.startupError = progress.startup_error || "";
+    updateRecordModalUI();
+  }
+
   function onRecordLogLine(line) {
     if (!recModal.active || !line) return;
     recModal.lastLog = line;
-    var mEp = line.match(/Recording episode\s+(\d+)/i);
+    if (recModal.authoritative || /^\[进度\]/.test(line)) return;
+    // Compatibility for an older running backend: accept only actual phase
+    // lines and deduplicate them. The current backend supplies structured state.
+    line = line.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").trim();
+    var mEp = line.match(/(?:^|\s)Recording episode\s+(\d+)\s*$/i);
     if (mEp) {
       var rawEp = parseInt(mEp[1], 10);
       if (!isNaN(rawEp)) {
+        if (recModal.rawEp !== null && (rawEp < recModal.rawEp || (rawEp === recModal.rawEp && !recModal.rerecord))) return;
         if (recModal.firstRawEp === null) recModal.firstRawEp = rawEp;
         recModal.curEp = Math.min(recModal.numEpisodes, Math.max(1, (rawEp - recModal.firstRawEp) + 1));
+        recModal.rawEp = rawEp; recModal.rerecord = false;
+        recModal.hasStarted = true;
       }
       recModal.phase = "recording";
-      recModal.phaseStartMs = Date.now();
+      recModal.phaseStartMs = performance.now();
       updateRecordModalUI();
       return;
     }
-    if (/Reset the environment/i.test(line)) {
+    if (/(?:^|\s)Reset the environment\s*$/i.test(line) && recModal.phase === "recording") {
       recModal.phase = "reset";
-      recModal.phaseStartMs = Date.now();
+      recModal.phaseStartMs = performance.now();
       updateRecordModalUI();
       return;
     }
-    if (/Re-record episode/i.test(line)) {
+    if (/(?:^|\s)Re-record episode\s*$/i.test(line) && ["recording", "reset"].includes(recModal.phase)) {
       recModal.phase = "preparing_next";
-      recModal.phaseStartMs = Date.now();
+      recModal.rerecord = true;
+      recModal.phaseStartMs = performance.now();
       updateRecordModalUI();
       return;
     }
-    if (/Encoding videos for episode/i.test(line)) {
-      recModal.phase = recModal.curEp < recModal.numEpisodes ? "preparing_next" : "saving";
-      recModal.phaseStartMs = Date.now();
-      updateRecordModalUI();
-      return;
-    }
-    if (/Stop recording|Recording stopped|safe_record/i.test(line)) {
+    if (/Encoding videos for episode|\[剧集保存\]/i.test(line)) {
+      if (recModal.phase === "saving" || recModal.phase === "closing") return;
       recModal.phase = "saving";
-      recModal.phaseStartMs = Date.now();
+      recModal.phaseStartMs = performance.now();
+      updateRecordModalUI();
+      return;
+    }
+    if (/(?:^|\s)(?:Stop recording|Recording stopped)\s*$/i.test(line) && recModal.phase !== "closing") {
+      recModal.phase = "closing";
+      recModal.phaseStartMs = performance.now();
       updateRecordModalUI();
     }
   }
@@ -681,8 +846,8 @@
     A.action(async function () {
       A.clearAlert("#dsAlert");
       await A.autosave.flush();
-      await A.api.post("/api/record/start", {});
-      openRecordModal();
+      var started = await A.api.post("/api/record/start", {});
+      openRecordModal(started);
       A.ok("采集任务已启动", "#dsAlert");
       A.refreshStatus();
     }, "#dsAlert");
@@ -712,10 +877,11 @@
       }, "#dsAlert");
     });
   });
-  A.click("btnMerge", function () {
+  function openMergeDialog(preselectedIds) {
     A.action(async function () {
       var r = await A.api.get("/api/datasets");
       var list = (r.datasets || []).filter(function (d) { return (d.episodes || 0) > 0; });
+      var preSet = new Set(preselectedIds || []);
       var mask = document.createElement("div");
       mask.className = "modal-mask";
       mask.innerHTML =
@@ -723,8 +889,9 @@
           '<div class="notify-head"><span class="notify-title">合并数据集</span></div>' +
           '<div class="notify-msg">' +
             list.map(function (d) {
+              var isChecked = preSet.has(d.repo_id) ? " checked" : "";
               return '<label class="check" style="display:flex;cursor:pointer;margin-top:6px">' +
-                '<input type="checkbox" value="' + A.esc(d.repo_id) + '"> ' +
+                '<input type="checkbox" value="' + A.esc(d.repo_id) + '"' + isChecked + '> ' +
                 A.esc(d.repo_id) + "（" + d.episodes + " 集）</label>";
             }).join("") +
             '<div class="field wide" style="margin-top:14px"><label>合并后的名称</label>' +
@@ -774,6 +941,7 @@
           box.close();
           if (mask.parentNode) mask.parentNode.removeChild(mask);
           A.ok("合并完成，列表已刷新", "#dsAlert");
+          selectedRepoIds.clear();
           await loadDatasets(true);
         } catch (e) {
           box.close();
@@ -781,6 +949,22 @@
         }
       });
     }, "#dsAlert");
+  }
+
+  if (A.el("btnBatchMerge")) {
+    A.click("btnBatchMerge", function () {
+      var ids = Array.from(selectedRepoIds);
+      if (ids.length < 2) {
+        A.toast("合并至少需要勾选 2 个数据集", "warn");
+        return;
+      }
+      openMergeDialog(ids);
+    });
+  }
+
+  A.click("btnMerge", function () {
+    var ids = Array.from(selectedRepoIds);
+    openMergeDialog(ids);
   });
   A.click("btnReloadDs", function () { loadDatasets(); });
 
@@ -854,25 +1038,32 @@
       onRecordLogLine(ev.line);
     }
     if (ev.type === "state") {
-      if (ev.running && ev.kind === "record" && !recModal.active) {
-        openRecordModal();
-      } else if (ev.running === false) {
+      if (ev.running && ev.kind === "record" && ev.job_id) {
+        if (recModal.active && recModal.jobId && ev.job_id !== recModal.jobId) { A.refreshStatus(); return; }
+        syncRecordJob(ev);
+      } else if (ev.running === false && ev.job_id === recModal.jobId) {
         if (recModal.active) closeRecordModal();
         clearTimeout(timer);
         timer = setTimeout(function () { loadDatasets(true); }, 800);
       }
     }
   });
+  A.onStatus(function (status) {
+    if (!status || (recModal.jobStartedAt && status.status_ts < recModal.jobStartedAt)) return;
+    if (status.running && status.job && status.job.kind === "record") syncRecordJob(status.job);
+    else if (recModal.active) closeRecordModal();
+  });
 
   window.addEventListener("pagehide", function () {
     clearInterval(dsWaybillTimer);
+    A.stopWaybillPreview(A.el("dsWaybillPreviewGrid"));
     closeRecordModal();
   });
 
   await loadConfig();
   var initSt = A.status();
   if (initSt && initSt.running && initSt.job && initSt.job.kind === "record") {
-    openRecordModal();
+    syncRecordJob(initSt.job);
   }
   A.autosave.form('recordForm','dataset');
   A.autosave.form('vizForm','viz');

@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock,patch
 import numpy as np
-from backend.homing_profile import trajectory
+from backend.homing_profile import trajectory, HOME_SPEED_RAD_S, HOME_ACCEL_RAD_S2
 from backend.shutdown_worker import home_arm
 import backend.main as main
 
@@ -50,8 +50,15 @@ class ProfileTests(unittest.TestCase):
     def test_long_return_is_bounded_in_speed_acceleration_and_starts_at_measurement(self):
         values=list(trajectory([2.,-3.8],[0,0]));dt=values[0][0];q=np.asarray([p for _,p in values]);v=np.diff(q,axis=0)/dt;a=np.diff(v,axis=0)/dt
         np.testing.assert_equal(q[0],[2.,-3.8]);np.testing.assert_allclose(q[-1],0,atol=1e-12)
-        self.assertLessEqual(abs(v).max(),.15+1e-6);self.assertLessEqual(abs(a).max(),.20+1e-6)
-        self.assertGreater(dt*len(q),45.)
+        self.assertLessEqual(abs(v).max(),.20+1e-6);self.assertLessEqual(abs(a).max(),.25+1e-6)
+        self.assertGreater(dt*len(q),35.)
+        self.assertLess(dt*(len(q)-1),36.)
+    def test_new_profile_is_faster_without_step_changes_or_relaxed_bounds(self):
+        old=list(trajectory([1.],[0.],speed=.15,acceleration=.20))
+        new=list(trajectory([1.],[0.]))
+        self.assertEqual((HOME_SPEED_RAD_S,HOME_ACCEL_RAD_S2),(.20,.25))
+        self.assertAlmostEqual(new[0][0]*(len(new)-1),.75*old[0][0]*(len(old)-1))
+        self.assertEqual(new[0][1],(1.,));self.assertEqual(new[-1][1],(0.,))
     def test_short_return_has_a_soft_start_and_end(self):
         points=list(trajectory([.02],[0]));self.assertGreaterEqual(sum(dt for dt,_ in points),2.)
         self.assertLess(abs(points[1][1][0]-.02),.00001)
@@ -59,8 +66,8 @@ class ProfileTests(unittest.TestCase):
         clock=Clock();motors={i:Motor(q) for i,q in enumerate([1,-.8,-1.2,.4,-.5,.3,-3.8],1)}
         home_arm(SimpleNamespace(poll_feedback_once=lambda:None),motors,position_mode=2,force_mode=4,sleep=clock.sleep,clock=clock.monotonic,log=lambda *a,**k:None)
         for motor in motors.values():
-            self.assertLessEqual(max(v for q,v in motor.commands),.15)
-            self.assertLessEqual(max(abs(b[0]-a[0]) for a,b in zip(motor.commands,motor.commands[1:])),.00501)
+            self.assertLessEqual(max(v for q,v in motor.commands),.20)
+            self.assertLessEqual(max(abs(b[0]-a[0]) for a,b in zip(motor.commands,motor.commands[1:])),.00668)
             self.assertEqual(motor.pos,0);self.assertEqual(motor.status,0)
 
 
@@ -78,8 +85,8 @@ class FollowerTests(unittest.TestCase):
         arm,clock=self.make();arm.safe_zero(exit_on_complete=False)
         self.assertFalse(arm._safe_zero_incomplete);self.assertGreater(clock.now,45)
         for motor in arm.motors.values():
-            self.assertLessEqual(max(v for q,v in motor.commands),.15)
-            self.assertLessEqual(max(abs(b[0]-a[0]) for a,b in zip(motor.commands,motor.commands[1:])),.00301)
+            self.assertLessEqual(max(v for q,v in motor.commands),.20)
+            self.assertLessEqual(max(abs(b[0]-a[0]) for a,b in zip(motor.commands,motor.commands[1:])),.00401)
             self.assertEqual(motor.pos,0)
     def test_obstruction_never_sends_final_zero_jump_or_claims_finished(self):
         arm,_=self.make();arm.motors['elbow_flex'].stuck=True
@@ -104,7 +111,7 @@ class SdkTests(unittest.TestCase):
         ctl,motors,clock=self.make();ctl.safe_home()
         self.assertGreater(clock.now,45.)
         for m in motors.values():
-            self.assertLessEqual(max(abs(b[0]-a[0]) for a,b in zip(m.commands,m.commands[1:])),.00301)
+            self.assertLessEqual(max(abs(b[0]-a[0]) for a,b in zip(m.commands,m.commands[1:])),.00401)
             self.assertEqual(m.pos,0.)
     def test_timeout_or_tracking_error_does_not_overwrite_target_with_zero(self):
         ctl,motors,_=self.make();motors['j2'].stuck=True

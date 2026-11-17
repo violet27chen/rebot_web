@@ -4,7 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>快递分拣 · 机械臂控制台</title>
   <link rel="icon" href="/static/img/logo.svg">
-  <link rel="stylesheet" href="/static/css/style.css?v=3.5.4-20261114-20-r2">
+  <link rel="stylesheet" href="/static/css/style.css?v=3.5.16-20261117-04">
 </head>
 <body>
   <div id="shell"></div>
@@ -47,24 +47,43 @@
           <input type="checkbox" id="chkIdleScanWaybill" checked> 待机时也自动连续扫码
         </label>
       </div>
+      <div style="margin-top:12px">
+        <div style="font-size:12.5px;font-weight:600;color:var(--muted,#64748b);margin-bottom:6px">扫码实时画面（绿框=已识别快递单号 · 橙框=已定位白色面单区域）</div>
+        <div id="waybillPreviewGrid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px">
+          <div class="muted" style="font-size:12.5px;padding:10px;border:1px dashed var(--border,#cbd5e1);border-radius:8px">正在加载扫码相机实时画面…</div>
+        </div>
+      </div>
     </div>
 
     <div class="card">
-      <div class="card-h"><h2>ACT 快递分拣 · 策略评估</h2><span class="sub">lerobot-record + --policy.path · 真机跑策略</span></div>
+      <div class="card-h"><h2>快递分拣 · 策略评估</h2><span class="sub">ACT / SmolVLA · 真机跑策略</span></div>
       <form id="evalForm">
         <div class="field"><label>策略模型路径</label><select name="policy_path"></select></div>
         <div class="field" style="margin-top:10px"><label>评估数据集 repo_id</label><input name="repo_id"></div>
         <div class="field" style="margin-top:10px"><label>任务描述</label><input name="single_task"></div>
+        <label class="check" style="margin-top:12px"><input type="checkbox" name="async_inference" checked> 异步推理（ACT / SmolVLA）：提前计算下一段动作</label>
+        <p id="evalInferenceMode" class="hint" role="status" aria-live="polite">正在读取推理模式…</p>
+        <p class="hint">支持 ACT 和 SmolVLA。模型在独立进程加载、预热后再连接机械臂；提前预测下一段，按顺序执行已接收的动作块，避免反复从起始动作重来。缓冲等待不计入静止结束时间，动作块之间不会自动回零或失能。</p>
+        <div class="row" style="margin-top:10px">
+          <div class="field"><label>n_action_steps · 每次执行步数</label><input name="n_action_steps" type="number" min="0" max="1000" step="1" value="0"><p class="hint">0 沿用模型全部预测步数（强烈推荐，如 ACT 通常为 50 或 100 步）。注意：若设为过小数值（如 &lt; 30），若模型起步有等待期，动作会在原地反复截断重置导致机械臂无法启动。</p></div>
+          <div class="field"><label>Flow Matching · 推理迭代次数</label><input name="flow_matching_steps" type="number" min="0" max="50" step="1" value="0"><p class="hint" id="flowSamplerHint">仅SmolVLA；0沿用检查点。调整后需验证效果与延迟。</p></div>
+        </div>
+        <details class="advanced-settings"><summary>Async预取与保护参数</summary><div class="row" style="margin-top:10px">
+          <div class="field"><label>剩余比例触发提前推理</label><input name="async_prefetch_ratio" type="number" min="0.1" max="0.95" step="0.05" value="0.6"></div>
+          <div class="field"><label>预测最大年龄 (s)</label><input name="async_max_age_s" type="number" min="0.1" max="5" step="0.1" value="1.5"></div>
+          <div class="field"><label>推理等待超时 (s)</label><input name="async_wait_timeout_s" type="number" min="0.1" max="10" step="0.1" value="2"></div>
+          <div class="field"><label>单帧电机角度上限 (°)</label><input name="async_max_step_deg" type="number" min="0.1" max="5" step="0.1" value="2"></div>
+        </div></details>
         <div style="margin-top:12px;padding:12px 14px;border:1.5px solid var(--primary,#2563eb);border-radius:10px;background:var(--bg-subtle,rgba(37,99,235,0.05))">
           <label class="check" style="font-weight:600;color:var(--primary,#1d4ed8)">
             <input type="checkbox" name="continuous_sort" id="chkContinuousSort" checked>
-            持续分拣模式（不按单集 30s 截断，连续分拣直到桌面所有快递弄完自动停机）
+            持续分拣模式（不按单集 30s 截断，可按静止时间结束）
           </label>
           <div class="row" id="continuousSortRow" style="margin-top:10px">
             <div class="field">
-              <label>桌面清空/静止自动停机 (s)</label>
+              <label>连续静止自动结束 (s)</label>
               <input name="idle_stop_s" type="number" min="0" max="300" value="8">
-              <span class="hint">机械臂回待机位连续静止满该秒数即判定全部快递已弄完（填 0 则仅手动停止）</span>
+              <span class="hint">按关节静止时间结束，不能据此确认包裹已全部分拣。填 0 关闭；仍有总时限与手动停止。</span>
             </div>
             <div class="field">
               <label>单次最长安全时限 (s)</label>
@@ -103,8 +122,8 @@
       <div class="log" id="logPanel"></div>
     </div>
   </div>
-  <script src="/static/js/common.js?v=3.5.4-20261114-23"></script>
-  <script src="/static/js/autosave.js?v=3.5.4-20261114-23"></script>
-  <script src="/static/js/eval.js?v=3.5.4-20261114-23"></script>
+  <script src="/static/js/common.js?v=3.5.16-20261117-04"></script>
+  <script src="/static/js/autosave.js?v=3.5.16-20261117-04"></script>
+  <script src="/static/js/eval.js?v=3.5.16-20261117-04"></script>
 </body>
 </html>

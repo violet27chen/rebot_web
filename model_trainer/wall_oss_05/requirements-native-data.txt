@@ -1,0 +1,20 @@
+# Additional data/utility dependencies for upstream Wall-X + LeRobot 0.4.4.
+# First install the PINNED Wall-X repo's requirements.txt, then this file.
+# Install lerobot==0.4.4 separately with --no-deps (its Torch upper bounds predate 2.10).
+datasets>=4.0.0,<4.2.0
+av>=15.0.0,<16.0.0
+einops>=0.8.0,<0.9.0
+draccus==0.10.0
+jsonlines>=4.0.0,<5.0.0
+gymnasium>=1.1.1,<2.0.0
+deepdiff>=7.0.1,<9.0.0
+imageio[ffmpeg]>=2.34.0,<3.0.0
+termcolor>=2.4.0,<4.0.0
+diffusers>=0.27.2,<0.36.0
+rerun-sdk>=0.24.0,<0.27.0
+pyserial>=3.5,<4.0
+pynput>=1.7.7,<1.9.0
+setuptools>=71.0.0,<81.0.0
+wheel
+cmake>=3.29.0.1,<4.2.0
+torchcodec==0.10.0

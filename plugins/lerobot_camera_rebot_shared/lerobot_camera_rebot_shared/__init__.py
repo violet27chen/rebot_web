@@ -27,6 +27,7 @@ class RebotSharedCameraConfig(CameraConfig):
     source: str = '0'
     broker_url: str = ''
     color_mode: str = 'rgb'
+    resize_to_config: bool = False
 
 
 def read_exact(stream, size):
@@ -82,6 +83,8 @@ class RebotSharedCamera(Camera):
             if parsed.scheme != 'http' or parsed.hostname not in ('127.0.0.1', 'localhost', '::1'):
                 raise ValueError('采集视觉链路必须使用 Ubuntu 本机的共享视觉服务')
             url = base.rstrip('/') + '/api/camera/raw?device=' + urllib.parse.quote(self.config.source, safe='')
+            if self.config.resize_to_config:
+                url += '&width='+str(self.width)+'&height='+str(self.height)
             self.response = urllib.request.urlopen(url, timeout=12)
             while not self.stop.is_set():
                 magic, seq, timestamp, width, height, channels, length = HEADER.unpack(read_exact(self.response, HEADER.size))
@@ -111,8 +114,14 @@ class RebotSharedCamera(Camera):
 
     def async_read(self, timeout_ms=1000):
         with self.condition:
+            wait_s = timeout_ms / 1000 if self.frame is not None else max(timeout_ms / 1000, 5.0)
+            if self.frame is not None:
+                wait_s = min(wait_s, 0.03)
             ready = self.condition.wait_for(lambda: self.error or self.stop.is_set() or
-                (self.frame is not None and self.sequence != self.consumed), timeout_ms / 1000)
+                (self.frame is not None and self.sequence != self.consumed), wait_s)
+            if (not ready and self.frame is not None and not self.error and not self.stop.is_set()
+                    and time.time() - self.captured_at <= 5.0):
+                return self.frame.copy()
             if self.error:
                 raise RuntimeError(self.error)
             if not ready or self.stop.is_set():

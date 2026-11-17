@@ -241,7 +241,7 @@
       }
       // 启动类接口返回后台任务：先别把按钮容器标成「完成」，等真实进度到达
       if (method !== "GET" && data && (data.name || data.steps || data.running === true)) {
-        expectJob();
+        expectJob(data.job_id);
       }
       return data;
     } catch (e) {
@@ -348,6 +348,7 @@
   }
   function fbTouchPending() {
     if (!fbActive) return;
+    if (fbActive.done) { fbBusy(false); return; }
     if (apiPending > 0) {
       fbBusy(true);
       fbShow(fbActive.box);
@@ -426,18 +427,19 @@
     if (jobExpectTimer) { clearTimeout(jobExpectTimer); jobExpectTimer = null; }
     if (fbActive) fbActive.expectJob = false;
   }
-  function expectJob() {
+  function expectJob(jobId) {
     if (!fbActive) return;
     // 记住"是哪个操作发起的任务"：后续点其它按钮时，任务日志仍留在这个操作里
     jobBox = fbActive.box || jobBox;
     fbActive.expectJob = true;
     fbActive.jobBound = true;
+    fbActive.jobId = jobId || '';
     if (jobExpectTimer) clearTimeout(jobExpectTimer);
     // 兜底：8 秒内既没收到进度事件也没查到运行任务，就正常收尾，不永久挂着
     jobExpectTimer = setTimeout(function () {
       jobExpectTimer = null;
       if (fbActive) fbActive.expectJob = false;
-      if (!jobRunning() && fbActive) fbFinish("ok", fbResultMsg || "后台任务已启动");
+      if (!jobRunning() && fbActive) fbFinish("warn", "尚未确认后台任务状态，请查看执行日志");
     }, 8000);
     refreshStatus();
   }
@@ -445,7 +447,7 @@
     if (!s || !s.running || !s.job) return null;
     var j = s.job;
     return {
-      running: true, job: j.name || "", kind: j.kind || "",
+      running: true, job_id: j.job_id, job: j.name || "", kind: j.kind || "",
       step: Number(j.step) || 0, step_total: Number(j.step_total) || 0,
       step_label: j.step_label || "", elapsed: Number(j.elapsed) || 0,
       step_elapsed: Number(j.step_elapsed) || 0, step_limit: Number(j.step_limit) || 0,
@@ -456,7 +458,7 @@
   }
   function fromState(ev) {
     return {
-      running: true, job: ev.job || "", kind: ev.kind || "",
+      running: true, job_id: ev.job_id, job: ev.job || "", kind: ev.kind || "",
       step: Number(ev.step) || 0, step_total: Number(ev.step_total) || 0,
       step_label: ev.step_label || "", elapsed: Number(ev.elapsed) || 0,
       step_elapsed: Number(ev.step_elapsed) || 0, step_limit: Number(ev.step_limit) || 0,
@@ -591,21 +593,28 @@
       renderProgress(p);
       return;
     }
-    jobProgress = null;
-    if (!opts.finish) return;
+    if (!opts.finish) { jobProgress = null; return; }
+    if (jobProgress && jobProgress.job_id && ev && ev.job_id && ev.job_id !== jobProgress.job_id) return;
     // 状态轮询恰好在任务刚下发时返回「空闲」：不抢在真实进度事件之前收尾
-    if (!opts.state && fbActive && fbActive.expectJob) return;
+    if (!opts.state && fbActive && fbActive.expectJob && (!ev || !fbActive.jobId || ev.job_id !== fbActive.jobId)) return;
     var bound = !!(fbActive && fbActive.jobBound);
     var hadTask = wasRunning || bound;
     if (!hadTask) return;   // 页面本来就没有任务，不凭空造一个「已完成」面板
+    var rawCode = ev && ev.exit_code != null ? ev.exit_code : p && p.exit_code != null ? p.exit_code : null;
+    if (rawCode === null || !Number.isFinite(Number(rawCode))) {
+      // An idle poll is not a successful exit. Retain the task until a terminal
+      // event or last_job snapshot supplies its real exit code.
+      if (fbActive && fbActive.box) fbSet(fbActive.box, "等待确认任务退出状态…", "busy");
+      return;
+    }
+    jobProgress = null;
     clearJobExpect();
     if (fbActive) fbActive.jobBound = false;
-    var code = ev && ev.exit_code !== undefined ? Number(ev.exit_code)
-      : (p && p.exit_code !== undefined ? Number(p.exit_code) : 0);
+    var code = Number(rawCode);
     var msg = Number(code) === 130 ? "任务已由急停终止"
       : (code !== 0 ? "任务失败（退出码 " + code + "），请查看执行日志"
         : (fbResultMsg || "后台任务已完成"));
-    if (wasRunning && bound) {
+    if (bound) {
       fbFinish(code === 0 ? "ok" : (Number(code) === 130 ? "warn" : "err"), msg);
     }
     finishGlobalView(code, msg);
@@ -641,7 +650,7 @@
     if (btn.hasAttribute("data-job-feedback") || /开始|启动|安装|训练|校准/.test(btn.textContent)) fbStart(btn);
   }, true);
 
-  /* ---------------- 提示：统一为模态通知（带遮罩、居中、需确认/自动关闭） ---------------- */
+  /* ---------------- 通知：每条独立到期，常驻外壳拥有计时器 ---------------- */
   window.addEventListener("unhandledrejection", function (e) {
     var r = e.reason;
     var m = r && r.message ? r.message : String(r || "");
@@ -654,6 +663,11 @@
   var lastNotifyKey = "", lastNotifyAt = 0;
   function notify(msg, type) {
     if(pageLeaving)return;
+    var owner = modalDocument().defaultView;
+    if (owner !== window && owner.APP && owner.APP.notify) {
+      owner.APP.notify(msg, type);
+      return;
+    }
     var text = String(msg == null ? "" : msg), key = (type || 'ok') + '|' + text;
     if (!text || (key === lastNotifyKey && Date.now() - lastNotifyAt < 1500)) return;
     lastNotifyKey = key; lastNotifyAt = Date.now();
@@ -665,14 +679,15 @@
     var close = document.createElement('button'); close.type = 'button'; close.textContent = '关闭';
     close.setAttribute('aria-label', '关闭通知'); close.setAttribute('data-app-nofb', '');
     item.appendChild(message); item.appendChild(close); host.appendChild(item);
-    while (host.children.length > 4) host.firstChild.remove();
     var timer;
     function dismiss() { clearTimeout(timer); item.remove(); }
-    function schedule() { timer = setTimeout(dismiss, type === 'err' ? 12000 : 5000); }
+    item.dismissNotification = dismiss;
+    while (host.children.length > 4) {
+      var oldest = host.firstElementChild;
+      if (oldest.dismissNotification) oldest.dismissNotification(); else oldest.remove();
+    }
     close.onclick = dismiss;
-    item.onmouseenter = item.onfocusin = function () { clearTimeout(timer); };
-    item.onmouseleave = item.onfocusout = schedule;
-    schedule();
+    timer = setTimeout(dismiss, type === 'err' ? 12000 : 5000);
   }
   function toast(msg, type) { notify(msg, type); }
 
@@ -927,7 +942,7 @@
     fbResultMsg = "";
     try {
       var r = await fn();
-      if (fbActive && !fbIdleTimer && !jobRunning()) fbFinish("ok", fbResultMsg || "");
+      if (fbActive && !fbActive.done && !fbIdleTimer && !jobRunning()) fbFinish("ok", fbResultMsg || "");
       return r;
     } catch (e) {
       var msg = (e && e.message) ? e.message : String(e);
@@ -945,7 +960,7 @@
     if (alertTarget) setAlert(alertTarget, msg, "ok");
     toast(msg, "ok");
     fbResultMsg = String(msg || "");
-    if (fbActive && !fbIdleTimer && !jobRunning()) fbSet(fbActive.box, "完成 · " + fbResultMsg, "ok");
+    if (fbActive && !fbActive.done && !fbIdleTimer && !jobRunning()) fbSet(fbActive.box, "完成 · " + fbResultMsg, "ok");
   }
 
   /* ---------------- 数据加载状态框：加载中 / 失败 / 空数据 ----------------
@@ -1269,7 +1284,7 @@
       var rt = el("railSerialTitle");
       if (rt && dualMode) rt.textContent = "串口（双臂四路）";
     }
-    setJobProgress(fromStatus(s), null, { finish: !!(s && s.running === false) });
+    setJobProgress(fromStatus(s), s && s.running === false ? s.last_job : null, { finish: !!(s && s.running === false) });
     statusCallbacks.forEach(function (cb) { try { cb(s); } catch (e) {} });
   }
   var statusFlight = null;
@@ -2332,6 +2347,190 @@
       window.addEventListener('resize',schedule);schedule();
     });
   }
+  function drawWaybillOverlay(canvas, sc, bgImg) {
+    var cw = canvas.clientWidth || 640;
+    var ch = canvas.clientHeight || 360;
+    if (canvas.width !== cw) canvas.width = cw;
+    if (canvas.height !== ch) canvas.height = ch;
+    var ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    if (bgImg && bgImg.naturalWidth > 0) {
+      ctx.drawImage(bgImg, 0, 0, cw, ch);
+    } else {
+      ctx.clearRect(0, 0, cw, ch);
+    }
+    var boxes = sc.boxes || [];
+    if (boxes.length && sc.width > 0 && sc.height > 0) {
+      var sx = cw / sc.width;
+      var sy = ch / sc.height;
+      var hasCode = sc.found > 0;
+      var color = hasCode ? "#22c55e" : "#f59e0b";
+      var label = hasCode ? "WAYBILL OK" : "LABEL ROI";
+      ctx.lineWidth = 3;
+      ctx.font = "600 12px sans-serif";
+      boxes.forEach(function (b) {
+        var bb = b && b.bbox;
+        if (!bb || bb.length !== 4) return;
+        var x1 = Math.round(bb[0] * sx), y1 = Math.round(bb[1] * sy);
+        var x2 = Math.round(bb[2] * sx), y2 = Math.round(bb[3] * sy);
+        ctx.strokeStyle = color;
+        ctx.strokeRect(x1, y1, Math.max(2, x2 - x1), Math.max(2, y2 - y1));
+        var tw = ctx.measureText(label).width + 10;
+        var ty = Math.max(18, y1);
+        ctx.fillStyle = color;
+        ctx.fillRect(x1, ty - 18, tw, 18);
+        ctx.fillStyle = "#ffffff";
+        ctx.fillText(label, x1 + 5, ty - 5);
+      });
+    } else if (sc.ok) {
+      var rw = cw * 0.42, rh = ch * 0.42;
+      var rx1 = (cw - rw) / 2, ry1 = (ch - rh) / 2;
+      var rx2 = rx1 + rw, ry2 = ry1 + rh;
+      var corner = Math.max(14, Math.min(rw, rh) / 6);
+      ctx.strokeStyle = "rgba(203, 213, 225, 0.75)";
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      [[rx1, ry1, 1, 1], [rx2, ry1, -1, 1], [rx1, ry2, 1, -1], [rx2, ry2, -1, -1]].forEach(function (p) {
+        ctx.moveTo(p[0] + p[2] * corner, p[1]);
+        ctx.lineTo(p[0], p[1]);
+        ctx.lineTo(p[0], p[1] + p[3] * corner);
+      });
+      ctx.stroke();
+    }
+  }
+
+  function stopWaybillPreview(gridEl) {
+    if (!gridEl || !gridEl._wbTiles) return;
+    gridEl._wbTiles.forEach(function (tile) {
+      tile.stopped = true;
+      if (tile.rafId) { cancelAnimationFrame(tile.rafId); tile.rafId = null; }
+      if (tile.retryTimer) { clearTimeout(tile.retryTimer); tile.retryTimer = null; }
+      if (tile.img) tile.img.src = "";
+    });
+    gridEl._wbTiles.clear();
+  }
+
+  function renderWaybillPreview(gridEl, cameras, opts) {
+    if (!gridEl || !Array.isArray(cameras) || !cameras.length) return;
+    opts = opts || {};
+    var shared = (window.parent !== window && window.parent.MONITOR) ? window.parent.MONITOR : null;
+    if (!gridEl._wbTiles) gridEl._wbTiles = new Map();
+    var tiles = gridEl._wbTiles;
+    var wanted = new Set(cameras.map(function (sc) { return String(sc.source); }));
+    tiles.forEach(function (tile, key) {
+      if (!wanted.has(key)) {
+        tile.stopped = true;
+        if (tile.rafId) { cancelAnimationFrame(tile.rafId); tile.rafId = null; }
+        if (tile.retryTimer) { clearTimeout(tile.retryTimer); tile.retryTimer = null; }
+        if (tile.img) tile.img.src = "";
+        if (tile.card && tile.card.parentNode === gridEl) gridEl.removeChild(tile.card);
+        tiles.delete(key);
+      }
+    });
+    if (tiles.size === 0 && gridEl.children.length) gridEl.innerHTML = "";
+
+    function startStream(tile) {
+      if (tile.stopped) return;
+      if (shared) {
+        tile.img.hidden = true;
+        shared.ensureSource(tile.source);
+        if (!tile.rafId) {
+          var tick = function () {
+            if (tile.stopped) return;
+            var parentImg = shared.getImage(tile.source);
+            if (parentImg && parentImg.naturalWidth > 0) {
+              tile.placeholder.hidden = true;
+              drawWaybillOverlay(tile.canvas, tile.lastSc || { ok: true }, parentImg);
+            } else {
+              var st = shared.sourceState(tile.source);
+              tile.placeholder.hidden = false;
+              tile.placeholder.textContent = (st && st.message) || "正在连接实时画面…";
+              drawWaybillOverlay(tile.canvas, tile.lastSc || { ok: false }, null);
+            }
+            tile.rafId = requestAnimationFrame(tick);
+          };
+          tile.rafId = requestAnimationFrame(tick);
+        }
+        return;
+      }
+      if (appStatus && appStatus.released) {
+        tile.placeholder.hidden = false;
+        tile.placeholder.textContent = "设备已断开";
+        return;
+      }
+      tile.img.hidden = false;
+      tile.img.src = "/api/camera/stream?device=" + encodeURIComponent(tile.source) + "&t=" + Date.now();
+    }
+
+    cameras.forEach(function (sc) {
+      var key = String(sc.source);
+      var tile = tiles.get(key);
+      if (!tile) {
+        var card = document.createElement("div");
+        card.style.cssText = "border:2px solid var(--border,#cbd5e1);border-radius:8px;padding:8px;background:var(--surface,#fff)";
+        var head = document.createElement("div");
+        head.style.cssText = "display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;font-size:" + (opts.compact ? "12px" : "12.5px");
+        var title = document.createElement("strong");
+        var badgeWrap = document.createElement("span");
+        head.appendChild(title);
+        head.appendChild(badgeWrap);
+
+        var stage = document.createElement("div");
+        stage.style.cssText = "position:relative;width:100%;aspect-ratio:16/9;border-radius:6px;overflow:hidden;background:#0f172a";
+        var img = document.createElement("img");
+        img.alt = (sc.name || key) + " 扫码画面";
+        img.style.cssText = "width:100%;height:100%;display:block;object-fit:fill;background:#0f172a";
+        var canvas = document.createElement("canvas");
+        canvas.style.cssText = "position:absolute;inset:0;width:100%;height:100%;pointer-events:none";
+        var placeholder = document.createElement("div");
+        placeholder.style.cssText = "position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#94a3b8;font-size:12px;background:rgba(15,23,42,0.72)";
+        placeholder.textContent = "正在连接实时画面…";
+        stage.appendChild(img);
+        stage.appendChild(canvas);
+        stage.appendChild(placeholder);
+
+        var hint = document.createElement("div");
+        hint.className = "muted";
+        hint.style.cssText = "font-size:" + (opts.compact ? "11px;margin-top:4px" : "11.5px;margin-top:5px");
+
+        card.appendChild(head);
+        card.appendChild(stage);
+        card.appendChild(hint);
+        gridEl.appendChild(card);
+
+        tile = {
+          source: key, card: card, title: title, badgeWrap: badgeWrap,
+          img: img, canvas: canvas, placeholder: placeholder, hint: hint,
+          lastSc: sc, stopped: false, retryTimer: null, rafId: null
+        };
+        img.onload = function () { tile.placeholder.hidden = true; };
+        img.onerror = function () {
+          if (tile.stopped || shared) return;
+          tile.placeholder.hidden = false;
+          tile.placeholder.textContent = (appStatus && appStatus.released) ? "设备已断开" : "画面重连中…";
+          if (tile.retryTimer) clearTimeout(tile.retryTimer);
+          tile.retryTimer = setTimeout(function () { tile.retryTimer = null; startStream(tile); }, 1500);
+        };
+        tiles.set(key, tile);
+        startStream(tile);
+      }
+
+      tile.lastSc = sc;
+      if (!shared && tile.img.naturalWidth > 0) tile.placeholder.hidden = true;
+      tile.card.style.borderColor = sc.found > 0 ? "#16a34a" : (sc.label_rois > 0 ? "#f59e0b" : "var(--border,#cbd5e1)");
+      tile.title.innerHTML = esc(sc.name) + ' <span class="muted">(' + esc(sc.source) + ')</span>';
+      tile.badgeWrap.innerHTML = sc.found > 0
+        ? '<span class="badge ok">✅ 已识别面单</span>'
+        : (sc.label_rois > 0
+          ? '<span class="badge warn">🎯 已框选白色面单</span>'
+          : (sc.ok ? '<span class="badge">🔍 扫描中</span>' : '<span class="badge err">未就绪</span>'));
+      tile.hint.textContent = sc.found > 0
+        ? (opts.foundHint || "已识别快递单号并写入文件")
+        : (sc.exposure_hint || (sc.label_rois > 0 ? "已定位白色面单，若反光或距离较远可稍靠近镜头" : "将快递面单朝向该相机即可自动框选识别"));
+      if (!shared) drawWaybillOverlay(tile.canvas, sc, null);
+    });
+  }
+
   window.APP = {
     commandPreview: commandPreview, init: init, api: API, esc: esc, el: el, q: q, qa: qa, icon: icon,
     toast: toast, notify: notify, confirm: confirmModal, prompt: promptModal,
@@ -2358,6 +2557,8 @@
     onRuntime: onRuntime, refreshRuntime: refreshRuntime,
     openClientSettings: openClientSettings,
     saveConfig: function (patch) { return API.post("/api/config", patch); },
-    stop: function () { return API.post("/api/stop", {}); }
+    stop: function () { return API.post("/api/stop", {}); },
+    renderWaybillPreview: renderWaybillPreview,
+    stopWaybillPreview: stopWaybillPreview
   };
 })();

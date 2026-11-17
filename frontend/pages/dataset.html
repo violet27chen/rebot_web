@@ -4,7 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>训练数据 · 机械臂控制台</title>
   <link rel="icon" type="image/svg+xml" href="/static/img/logo.svg">
-  <link rel="stylesheet" href="/static/css/style.css?v=3.5.4-20261114-20-r2">
+  <link rel="stylesheet" href="/static/css/style.css?v=3.5.16-20261117-04">
 </head>
 <body>
   <div id="shell"></div>
@@ -37,6 +37,14 @@
           <button class="btn primary" type="button" id="btnRecord">开始采集</button>
           <button class="btn danger" type="button" id="btnStop" title="录制中会自动发送 ESC，保存并编码当前剧集后再退出">停止录制</button>
         </div>
+        <details class="advanced-settings" style="margin-top:12px">
+          <summary>采集画质与保存速度</summary>
+          <div class="row" style="margin-top:10px">
+            <div class="field"><label>录制分辨率（所有相机）</label><select name="video_resolution"><option value="640x360">640 × 360 · 推荐，节省磁盘</option><option value="1280x720">1280 × 720 · 更多细节</option><option value="source">设备原始尺寸</option></select></div>
+            <div class="field"><label>视频编码</label><select name="vcodec"><option value="h264">H.264 · 推荐，保存更快</option><option value="hevc">HEVC</option><option value="libsvtav1">AV1 · 编码等待较长</option></select></div>
+          </div>
+          <p class="hint">自动保存，下一次开始采集生效。三路相机均保留；常驻预览和扫码仍用设备原始画面。续录沿用原尺寸、帧率和编码；旧 AV1 数据集续录仍可能较慢，建议新数据集选 H.264。每集结束需写盘、统计并编码，再进入下一集；重置时长是额外的人工摆放时间。</p>
+        </details>
       </form>
       <hr>
       <div class="card-h"><h2 style="font-size:13.5px">录制键盘控制</h2><span class="sub">发送给机器人主机上的录制窗口</span></div>
@@ -79,6 +87,12 @@
           <input type="checkbox" id="chkDsIdleScanWaybill" checked> 待机时也自动连续扫码
         </label>
       </div>
+      <div style="margin-top:10px">
+        <div style="font-size:12px;font-weight:600;color:var(--muted,#64748b);margin-bottom:6px">扫码实时画面（绿框=已识别快递单号 · 橙框=已定位白色面单区域）</div>
+        <div id="dsWaybillPreviewGrid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px">
+          <div class="muted" style="font-size:12px;padding:10px;border:1px dashed var(--border,#cbd5e1);border-radius:8px">正在加载扫码相机实时画面…</div>
+        </div>
+      </div>
     </div>
 
     <div class="card">
@@ -88,8 +102,7 @@
         <button class="btn subtle" type="button" id="btnVizWebStop">关闭</button>
       </div>
       <div class="note" style="margin-top:12px">
-        启动后会在新标签页打开 Rerun 网页查看器；采集时 front / side 两路画面和机械臂状态都显示在里面
-        （采集参数里的「显示数据」需勾选）。录制期间网页「摄像头」页打不开相机是正常的——相机被录制进程独占。
+        启动后可打开 Rerun 网页查看器。全部已配置相机与常驻监视共用视觉进程，录制时仍可查看实时画面。
       </div>
     </div>
 
@@ -101,10 +114,18 @@
         <button class="btn subtle" type="button" id="btnExportCurrentVid">一键仅导出视频 (.zip)</button>
         <a class="btn primary" href="/p/train">前往训练 →</a>
       </div>
+      <div class="btn-row batch-bar" id="dsBatchBar" style="display:flex;align-items:center;gap:8px;margin-bottom:12px;padding:8px 12px;background:var(--surface-2);border:1px solid var(--border);border-radius:6px;flex-wrap:wrap">
+        <span id="dsSelectedCount" style="font-weight:600;font-size:13px;color:var(--text)">已选择 0 项</span>
+        <button class="btn sm primary" type="button" id="btnBatchMerge" disabled>合并所选数据集</button>
+        <button class="btn sm subtle" type="button" id="btnBatchExportAll" disabled>批量导出所选 (完整+视频)</button>
+        <button class="btn sm subtle" type="button" id="btnBatchExportVid" disabled>批量导出所选 (仅视频)</button>
+        <button class="btn sm danger" type="button" id="btnBatchDelete" disabled>批量删除所选</button>
+        <button class="btn sm subtle" type="button" id="btnBatchDeselect" style="margin-left:auto;display:none">清空选择</button>
+      </div>
       <div class="scroll">
         <table class="table" id="dsTable">
-          <thead><tr><th>repo_id</th><th>剧集</th><th>大小</th><th>路径</th><th>操作</th></tr></thead>
-          <tbody><tr><td colspan="5" class="muted">正在读取 …</td></tr></tbody>
+          <thead><tr><th style="width:38px;text-align:center"><input type="checkbox" id="dsSelectAll" title="全选 / 取消全选" aria-label="全选"></th><th>repo_id</th><th>剧集</th><th>大小</th><th>路径</th><th>操作</th></tr></thead>
+          <tbody><tr><td colspan="6" class="muted">正在读取 …</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -152,9 +173,9 @@
     <iframe id="camDockFrame" src="about:blank" title="摄像头画面"></iframe>
   </div>
 
-  <script src="/static/js/common.js?v=3.5.4-20261114-23"></script>
-  <script src="/static/js/autosave.js?v=3.5.4-20261114-23"></script>
-  <script src="/static/js/dataset.js?v=3.5.4-20261114-23"></script>
-  <script src="/static/js/collection-plan.js?v=3.5.4-20261114-23"></script>
+  <script src="/static/js/common.js?v=3.5.16-20261117-04"></script>
+  <script src="/static/js/autosave.js?v=3.5.16-20261117-04"></script>
+  <script src="/static/js/dataset.js?v=3.5.16-20261117-04"></script>
+  <script src="/static/js/collection-plan.js?v=3.5.16-20261117-04"></script>
 </body>
 </html>

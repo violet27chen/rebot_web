@@ -1,0 +1,106 @@
+--- a/lerobot_robot_seeed_b601/bi_seeed_b601_dm_follower.py
++++ b/lerobot_robot_seeed_b601/bi_seeed_b601_dm_follower.py
+@@ -115,13 +115,21 @@
+         }
+ 
+     def disconnect(self):
+-        errors = []
+-        for arm in (self.right_arm, self.left_arm):
++        """Coordinated parallel shutdown on the two independent CAN buses."""
++        from .coordinated_shutdown import parallel_shutdown
++        arms = [arm for arm in (self.left_arm, self.right_arm)
++                if getattr(arm, 'bus', None) is not None or arm.is_connected]
++        homing = [arm for arm in arms if getattr(arm, '_connection_ready', False)
++                  and not getattr(arm, '_skip_safe_zero_on_disconnect', False)
++                  and not getattr(arm, '_emergency_disable_requested', False)
++                  and not getattr(arm, '_in_safe_zero', False)]
++
++        def finish(arm, group):
++            arm._coordinated_shutdown = group
+             try:
+-                if arm.is_connected:
+-                    arm.disconnect()
+-            except Exception as exc:
+-                errors.append(exc)
+-                logger.exception("Failed to disconnect one arm in the bimanual robot")
+-        if errors:
+-            raise errors[0]
++                arm.disconnect()
++            finally:
++                del arm._coordinated_shutdown
++
++        logger.info('Bimanual shutdown: both followers return concurrently; coordinated stage/disable checks')
++        parallel_shutdown(arms, finish, checkpoint_count=max(1, len(homing)))
+--- a/lerobot_robot_seeed_b601/seeed_b601_follower.py
++++ b/lerobot_robot_seeed_b601/seeed_b601_follower.py
+@@ -468,6 +468,7 @@
+     def safe_zero(self, step_interval_s: float = 0.02, exit_on_complete: bool = True) -> None:
+         """Slow measured-pose return; never use send_action's runtime speed."""
+         from .homing_profile import trajectory, HOME_SPEED_RAD_S
++        sync=getattr(self,'_coordinated_shutdown',None)
+         publisher=None
+         try:
+             from telemetry_client import FeedbackPublisher
+@@ -481,6 +482,7 @@
+         try:
+             if set(ids)!=set(range(1,8)):raise RuntimeError('safe_zero requires all 7 motor mappings')
+             def read():
++                if sync:sync.check()
+                 for name in ids.values():self.motors[name].request_feedback()
+                 time.sleep(.015);self.bus.poll_feedback_once()
+                 states={i:self.motors[name].get_state() for i,name in ids.items()}
+@@ -494,6 +496,7 @@
+                     except Exception:pass
+                 return states
+             def send(q):
++                if sync:sync.check()
+                 if self.motor_type=='rs':
+                     action={}
+                     for i,name in ids.items():
+@@ -507,12 +510,16 @@
+                     else:motor.send_pos_vel(q[i],HOME_SPEED_RAD_S)
+             states=read()
+             if any(abs(st.pos)>4*math.pi for st in states.values()):raise RuntimeError('safe_zero: multi-turn offset outside homing range')
++            if sync:sync.checkpoint()
+             # Preserve the established CAN-ID stage order and park target.
+             goal={i:0. for i in ids};goal[7]=math.radians(float(getattr(self.config,'gripper_park_deg',0.) or 0.))
+             for stage,active in enumerate(((1,4,5,6),(2,3),(7,)),1):
+                 states=read();target={i:st.pos for i,st in states.items()};previous=dict(target)
+                 logger.info('safe_zero stage%s: measured pose, max %.1f deg/s, smooth acceleration',stage,math.degrees(HOME_SPEED_RAD_S))
+-                for interval,point in trajectory([target[i] for i in active],[goal[i] for i in active],hz=1/max(.02,min(.1,step_interval_s or .02))):
++                def hold():
++                    read();send(target)
++                duration=sync.movement_duration([target[i] for i in active],[goal[i] for i in active],hold=hold) if sync else 2.
++                for interval,point in trajectory([target[i] for i in active],[goal[i] for i in active],hz=1/max(.02,min(.1,step_interval_s or .02)),min_duration=duration):
+                     states=read()
+                     if any(abs(states[i].pos-previous[i])>.10 for i in active):
+                         send({i:st.pos for i,st in states.items()});raise RuntimeError('safe_zero following error; holding measured pose')
+@@ -525,8 +532,11 @@
+                     if settled>=8:break
+                     time.sleep(.02)
+                 else:raise RuntimeError('safe_zero not settled; keep torque and do not disable')
++                if sync:
++                    sync.checkpoint(hold)
+             states=read()
+             if any(abs(st.pos-goal[i])>=.035 or abs(st.vel)>=.05 for i,st in states.items()):raise RuntimeError('safe_zero final feedback not settled')
++            if sync:sync.checkpoint(lambda:(read(),send(goal)))
+             self._safe_zero_incomplete=False
+             logger.info('safe_zero: measured zero settled; holding 3 seconds before disconnect')
+             time.sleep(3.)
+@@ -534,6 +544,7 @@
+         except Exception:
+             # Never drop an arm mid-return after missing feedback/obstruction.
+             self._safe_zero_incomplete=True
++            if sync:sync.abort()
+             raise
+         finally:self._in_safe_zero=False
+ 
+@@ -720,6 +731,8 @@
+ 
+         hold_gripper = bool(getattr(self.config, "hold_gripper_on_disconnect", False))
+         incomplete = bool(getattr(self, "_safe_zero_incomplete", False))
++        sync=getattr(self,'_coordinated_shutdown',None)
++        if sync and sync.cancelled.is_set():incomplete=True
+         if incomplete:
+             logger.warning("disconnect: safe_zero incomplete, keeping torque (skip disable)")
+         for name, motor in self.motors.items():

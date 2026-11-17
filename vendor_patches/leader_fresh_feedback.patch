@@ -1,0 +1,59 @@
+--- a/lerobot_teleoperator_rebot_arm_102/rebot_arm_102_leader.py
++++ b/lerobot_teleoperator_rebot_arm_102/rebot_arm_102_leader.py
+@@ -9,7 +9,7 @@
+ from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
+ 
+ from .config_rebot_arm_102_leader import RebotArm102LeaderConfig
+-from .connection_safety import verify_servos, initial_positions
++from .connection_safety import verify_servos, initial_positions, read_fresh_feedback, read_action_positions
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -143,17 +143,14 @@
+             self.bus.reset_multi_turn(motor_id)
+ 
+     def _read_raw_positions(self) -> dict[str, float]:
+-        result: dict[int, ServoMonitor | None] = self.bus.sync_monitor(
+-            list(self.config.joint_ids.values())
+-        )
+-        id_to_name = {v: k for k, v in self.config.joint_ids.items()}
+-        raw_positions: dict[str, float] = {}
+-        for motor_id, m in result.items():
+-            motor_name = id_to_name[motor_id]
+-            if m is None:
+-                raise RuntimeError(f"Servo {motor_name} (id={motor_id}) has never responded.")
+-            raw_positions[motor_name] = m.angle_deg
+-        return raw_positions
++        def recovered(names, elapsed):
++            now = time.monotonic()
++            if now - getattr(self, '_last_feedback_warning', float('-inf')) >= 5:
++                self._last_feedback_warning = now
++                logger.debug('主臂 %s 已补充读取关节角度：%s（%.3fs）',
++                               self.config.port, ', '.join(names), elapsed)
++        return read_fresh_feedback(self.bus, self.config.joint_ids, self.config.port,
++                                   on_recovery=recovered)
+ 
+     @staticmethod
+     def _clamp(value: float, min_value: float, max_value: float) -> float:
+@@ -187,17 +184,10 @@
+         if not self.is_connected:
+             raise DeviceNotConnectedError(f"{self} is not connected.")
+         
+-        raw_positions: dict[str, Any] = {}
+-        try:
+-            raw_positions = self._read_raw_positions()
+-            logger.debug(f"Raw positions: {', '.join(f'{m}: {p:.1f}°' for m, p in raw_positions.items())}")
+-            self._last_raw_positions = raw_positions
+-        except Exception as e:
+-            logger.error(f"Failed to read raw positions: {e}")
+-            logger.warning("[EMERGENCY STOP] Please hold the follower arm and cut off the main power to the arms.")
+-            logger.warning("[EMERGENCY STOP] Break the teleoperation session and check the USB connection or power of the leader arm.")
+-            raw_positions = self._last_raw_positions
+-            
++        # Never continue driving followers indefinitely from cached leader angles.
++        raw_positions = read_action_positions(self._read_raw_positions, attempts=1)
++        self._last_raw_positions = dict(raw_positions)
++
+         action_dict: dict[str, Any] = {}
+         for motor_name in self.motor_names:
+             range_min, range_max = self.config.joint_ranges[motor_name]

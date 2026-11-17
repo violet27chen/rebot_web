@@ -1,0 +1,36 @@
+--- a/scripts/lerobot_teleoperate.py
++++ b/scripts/lerobot_teleoperate.py
+@@ -52,6 +52,7 @@
+ """
+ 
+ import logging
++from lerobot.utils.rebot_cleanup import finish_cleanup
+ import time
+ from dataclasses import asdict, dataclass
+ from pprint import pformat
+@@ -245,13 +246,19 @@
+     except KeyboardInterrupt:
+         pass
+     finally:
+-        if cfg.display_data:
+-            rr.rerun_shutdown()
+-        for device in (robot, teleop):
++        with finish_cleanup():
+             try:
+-                device.disconnect()
+-            except Exception:
+-                logging.exception("Failed to disconnect a device during teleoperation cleanup")
++                try:
++                    robot.disconnect()
++                except Exception:
++                    logging.exception("Failed to disconnect robot during teleoperation cleanup")
++            finally:
++                try:
++                    if teleop.is_connected:
++                        teleop.disconnect()
++                finally:
++                    if cfg.display_data:
++                        rr.rerun_shutdown()
+ 
+ 
+ def main():

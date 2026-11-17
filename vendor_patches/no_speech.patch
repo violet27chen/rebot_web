@@ -1,0 +1,46 @@
+--- a/utils/utils.py
++++ b/utils/utils.py
+@@ -196,38 +196,13 @@
+ 
+ 
+ def say(text: str, blocking: bool = False):
+-    system = platform.system()
+-
+-    if system == "Darwin":
+-        cmd = ["say", text]
+-
+-    elif system == "Linux":
+-        cmd = ["spd-say", text]
+-        if blocking:
+-            cmd.append("--wait")
+-
+-    elif system == "Windows":
+-        cmd = [
+-            "PowerShell",
+-            "-Command",
+-            "Add-Type -AssemblyName System.Speech; "
+-            f"(New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('{text}')",
+-        ]
+-
+-    else:
+-        raise RuntimeError("Unsupported operating system for text-to-speech.")
+-
+-    if blocking:
+-        subprocess.run(cmd, check=True)
+-    else:
+-        subprocess.Popen(cmd, creationflags=subprocess.CREATE_NO_WINDOW if system == "Windows" else 0)
+-
+-
+-def log_say(text: str, play_sounds: bool = True, blocking: bool = False):
++    """Legacy import compatibility: parcel sorting reports progress through logs only."""
+     logging.info(text)
+ 
+-    if play_sounds:
+-        say(text, blocking)
++
++def log_say(text: str, play_sounds: bool = False, blocking: bool = False):
++    """Keep existing callers compatible without launching any speech process."""
++    logging.info(text)
+ 
+ 
+ def get_channel_first_image_shape(image_shape: tuple) -> tuple:

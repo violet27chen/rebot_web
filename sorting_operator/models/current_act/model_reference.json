@@ -1,0 +1,23 @@
+{
+  "source_checkpoint": "/home/legion/rebot_source_20261113/rebot_web/outputs/train/tese1/checkpoints/020000/pretrained_model",
+  "source_dataset": "/home/legion/.cache/huggingface/lerobot/all_1",
+  "episodes": 41,
+  "state_names": [
+    "left_shoulder_pan.pos",
+    "left_shoulder_lift.pos",
+    "left_elbow_flex.pos",
+    "left_wrist_flex.pos",
+    "left_wrist_yaw.pos",
+    "left_wrist_roll.pos",
+    "left_gripper.pos",
+    "right_shoulder_pan.pos",
+    "right_shoulder_lift.pos",
+    "right_elbow_flex.pos",
+    "right_wrist_flex.pos",
+    "right_wrist_yaw.pos",
+    "right_wrist_roll.pos",
+    "right_gripper.pos"
+  ],
+  "model_sha256": "a68e6adf90fb121a0aba7e87d7f51f3b82b4f7529afbdf2e9b5fa50c0d33644a",
+  "note": "Existing all_1 / tese1 step 020000 checkpoint, copied without modification; dataset and train_config are not included."
+}

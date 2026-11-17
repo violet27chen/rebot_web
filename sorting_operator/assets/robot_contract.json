@@ -1,0 +1,114 @@
+{
+  "joint_names": [
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_yaw",
+    "wrist_roll",
+    "gripper"
+  ],
+  "joint_directions": {
+    "shoulder_pan": -1.0,
+    "shoulder_lift": -1.0,
+    "elbow_flex": 1.0,
+    "wrist_flex": 1.0,
+    "wrist_yaw": 1.0,
+    "wrist_roll": -1.0,
+    "gripper": -6.0
+  },
+  "joint_limits_deg": {
+    "shoulder_pan": [
+      -145.0,
+      145.0
+    ],
+    "shoulder_lift": [
+      -170.0,
+      0.0
+    ],
+    "elbow_flex": [
+      -200.0,
+      0.0
+    ],
+    "wrist_flex": [
+      -80.0,
+      90.0
+    ],
+    "wrist_yaw": [
+      -90.0,
+      90.0
+    ],
+    "wrist_roll": [
+      -130.0,
+      130.0
+    ],
+    "gripper": [
+      -270.0,
+      0.0
+    ]
+  },
+  "motor_can_ids": {
+    "shoulder_pan": [
+      1,
+      17
+    ],
+    "shoulder_lift": [
+      2,
+      18
+    ],
+    "elbow_flex": [
+      3,
+      19
+    ],
+    "wrist_flex": [
+      4,
+      20
+    ],
+    "wrist_yaw": [
+      5,
+      21
+    ],
+    "wrist_roll": [
+      6,
+      22
+    ],
+    "gripper": [
+      7,
+      23
+    ]
+  },
+  "action_names": [
+    "left_shoulder_pan.pos",
+    "left_shoulder_lift.pos",
+    "left_elbow_flex.pos",
+    "left_wrist_flex.pos",
+    "left_wrist_yaw.pos",
+    "left_wrist_roll.pos",
+    "left_gripper.pos",
+    "right_shoulder_pan.pos",
+    "right_shoulder_lift.pos",
+    "right_elbow_flex.pos",
+    "right_wrist_flex.pos",
+    "right_wrist_yaw.pos",
+    "right_wrist_roll.pos",
+    "right_gripper.pos"
+  ],
+  "state_names": [
+    "left_shoulder_pan.pos",
+    "left_shoulder_lift.pos",
+    "left_elbow_flex.pos",
+    "left_wrist_flex.pos",
+    "left_wrist_yaw.pos",
+    "left_wrist_roll.pos",
+    "left_gripper.pos",
+    "right_shoulder_pan.pos",
+    "right_shoulder_lift.pos",
+    "right_elbow_flex.pos",
+    "right_wrist_flex.pos",
+    "right_wrist_yaw.pos",
+    "right_wrist_roll.pos",
+    "right_gripper.pos"
+  ],
+  "state_units": "raw_motor_degrees",
+  "action_units": "leader_degrees_before_direction_and_gripper_scaling"
+}

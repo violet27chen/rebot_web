@@ -1,0 +1,4 @@
+# Known matching CUDA Torch / video-decoder versions. Install CUDA wheels first.
+torch==2.10.0
+torchvision==0.25.0
+torchcodec==0.10.0

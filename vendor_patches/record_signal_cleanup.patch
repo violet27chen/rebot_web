@@ -1,0 +1,68 @@
+--- a/scripts/lerobot_record.py
++++ b/scripts/lerobot_record.py
+@@ -63,6 +63,7 @@
+ """
+ 
+ import logging
++from lerobot.utils.rebot_cleanup import finish_cleanup
+ import time
+ from dataclasses import asdict, dataclass, field
+ from pathlib import Path
+@@ -557,33 +558,34 @@
+                 dataset.save_episode()
+                 recorded_episodes += 1
+     finally:
+-        # Parcel sorting has no speech playback; progress never waits for desktop audio.
+-        logging.info("Stop recording")
+-        try:
+-            if dataset:
+-                logging.info("[采集收尾] 正在关闭数据集与视频写入器")
+-                dataset.finalize()
+-                logging.info("[采集收尾] 数据集关闭完成")
+-        finally:
+-            # Even a disk/encoder failure must release the teleoperation lifecycle.
++        with finish_cleanup():
++            # Parcel sorting has no speech playback; progress never waits for desktop audio.
++            logging.info("Stop recording")
+             try:
+-                if robot.is_connected:
+-                    logging.info("[采集收尾] 正在执行从臂收工（按当前归零/保持设置）")
+-                    robot.disconnect()
+-                    logging.info("[采集收尾] 从臂收工完成")
++                if dataset:
++                    logging.info("[采集收尾] 正在关闭数据集与视频写入器")
++                    dataset.finalize()
++                    logging.info("[采集收尾] 数据集关闭完成")
+             finally:
++                # Even a disk/encoder failure must release the teleoperation lifecycle.
+                 try:
+-                    if teleop and teleop.is_connected:
+-                        teleop.disconnect()
+-                        logging.info("[采集收尾] 主臂串口已释放")
++                    if robot.is_connected:
++                        logging.info("[采集收尾] 正在执行从臂收工（按当前归零/保持设置）")
++                        robot.disconnect()
++                        logging.info("[采集收尾] 从臂收工完成")
+                 finally:
+-                    if not is_headless() and listener:
+-                        listener.stop()
+-
+-        if cfg.dataset.push_to_hub:
+-            dataset.push_to_hub(tags=cfg.dataset.tags, private=cfg.dataset.private)
+-
+-        logging.info("Exiting")
++                    try:
++                        if teleop and teleop.is_connected:
++                            teleop.disconnect()
++                            logging.info("[采集收尾] 主臂串口已释放")
++                    finally:
++                        if not is_headless() and listener:
++                            listener.stop()
++
++            if cfg.dataset.push_to_hub:
++                dataset.push_to_hub(tags=cfg.dataset.tags, private=cfg.dataset.private)
++
++            logging.info("Exiting")
+     return dataset
+ 
+ 

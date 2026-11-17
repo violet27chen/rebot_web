@@ -1,0 +1,40 @@
+--- a/lerobot_teleoperator_rebot_arm_102/rebot_arm_102_leader.py
++++ b/lerobot_teleoperator_rebot_arm_102/rebot_arm_102_leader.py
+@@ -9,7 +9,7 @@
+ from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
+ 
+ from .config_rebot_arm_102_leader import RebotArm102LeaderConfig
+-from .connection_safety import verify_servos, initial_positions, fresh_positions, read_action_positions
++from .connection_safety import verify_servos, initial_positions, read_fresh_feedback, read_action_positions
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -143,11 +143,14 @@
+             self.bus.reset_multi_turn(motor_id)
+ 
+     def _read_raw_positions(self) -> dict[str, float]:
+-        result: dict[int, ServoMonitor | None] = self.bus.sync_monitor(
+-            list(self.config.joint_ids.values())
+-        )
+-        # SDK reliable=False means a held cache, not a fresh angle.
+-        return fresh_positions(result, self.config.joint_ids)
++        def recovered(names, elapsed):
++            now = time.monotonic()
++            if now - getattr(self, '_last_feedback_warning', float('-inf')) >= 5:
++                self._last_feedback_warning = now
++                logger.debug('主臂 %s 已补充读取关节角度：%s（%.3fs）',
++                               self.config.port, ', '.join(names), elapsed)
++        return read_fresh_feedback(self.bus, self.config.joint_ids, self.config.port,
++                                   on_recovery=recovered)
+ 
+     @staticmethod
+     def _clamp(value: float, min_value: float, max_value: float) -> float:
+@@ -182,7 +185,7 @@
+             raise DeviceNotConnectedError(f"{self} is not connected.")
+         
+         # Never continue driving followers indefinitely from cached leader angles.
+-        raw_positions = read_action_positions(self._read_raw_positions)
++        raw_positions = read_action_positions(self._read_raw_positions, attempts=1)
+         self._last_raw_positions = dict(raw_positions)
+ 
+         action_dict: dict[str, Any] = {}

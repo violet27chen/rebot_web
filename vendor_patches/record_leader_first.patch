@@ -1,0 +1,14 @@
+--- a/lerobot_record.py
++++ b/lerobot_record.py
+@@ -495,9 +495,10 @@
+                 },
+             )
+ 
+-        robot.connect()
++        # Validate leaders first: a missing master must not enable followers.
+         if teleop is not None:
+             teleop.connect()
++        robot.connect()
+ 
+         listener, events = init_keyboard_listener()
+ 

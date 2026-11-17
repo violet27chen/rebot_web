@@ -1,0 +1,137 @@
+{
+  "execution_mode": "complete",
+  "inference": {
+    "n_action_steps": 0,
+    "flow_matching_steps": 0
+  },
+  "ports": {
+    "left": "/dev/ttyACM0",
+    "right": "/dev/ttyACM1"
+  },
+  "cameras": [
+    {
+      "name": "left_左",
+      "source": "0"
+    },
+    {
+      "name": "left_深度相机",
+      "source": "4"
+    },
+    {
+      "name": "left_右",
+      "source": "6"
+    }
+  ],
+  "top_camera": "left_深度相机",
+  "capture_size": [
+    1920,
+    1080
+  ],
+  "fps": 30,
+  "control_hz": 100,
+  "device": "cuda",
+  "vision_device": "cpu",
+  "yolo_model": null,
+  "yolo_classes": {
+    "box": [
+      "box",
+      "盒子"
+    ],
+    "bag": [
+      "bag",
+      "袋子"
+    ],
+    "stack": [
+      "stack",
+      "stacked",
+      "堆叠"
+    ]
+  },
+  "waybill_pattern": "[A-Za-z0-9-]{8,32}",
+  "workspace": [
+    0.15,
+    0.15,
+    0.85,
+    0.85
+  ],
+  "exit_regions": {
+    "box": [
+      0.85,
+      0.0,
+      1.0,
+      1.0
+    ],
+    "bag": [
+      0.0,
+      0.85,
+      1.0,
+      1.0
+    ]
+  },
+  "models": {
+    "complete": "models/current_act",
+    "unstack": null,
+    "push": null,
+    "flip_box": null,
+    "flip_bag": null,
+    "flatten": null,
+    "route_box": null,
+    "route_bag": null
+  },
+  "rules": {},
+  "skill_entries": {
+    "complete": {
+      "min_motor_deg": [
+        -5.715611457824707,
+        -57.03568649291992,
+        -119.83064270019531,
+        -2.1092171669006348,
+        -16.622220993041992,
+        -3.8140323162078857,
+        -2.3714964389801025,
+        -29.91120147705078,
+        -6.1964569091796875,
+        -115.89640045166016,
+        -0.7103396654129028,
+        -24.88412857055664,
+        -19.485437393188477,
+        -46.32578659057617
+      ],
+      "max_motor_deg": [
+        12.60055160522461,
+        -0.010928303003311157,
+        0.3606339991092682,
+        54.95925521850586,
+        6.699158668518066,
+        8.141695022583008,
+        -0.010928303003311157,
+        18.08661460876465,
+        0.31692078709602356,
+        0.03278490900993347,
+        38.741432189941406,
+        35.37546157836914,
+        12.534981727600098,
+        -0.010928303003311157
+      ]
+    }
+  },
+  "skill_entry_tolerance_deg": 8.0,
+  "skill_seconds": 8.0,
+  "max_skill_attempts": 3,
+  "max_parcels": 10,
+  "max_run_s": 600,
+  "stable_frames": 3,
+  "heartbeat_s": 1.0,
+  "camera_max_age_s": 1.0,
+  "max_speed_rad_s": 0.15,
+  "max_acceleration_rad_s2": 0.2,
+  "tracking_limit_deg": 20.0,
+  "temperature_limit_c": 80.0,
+  "gripper_torque_ratio": 0.12,
+  "torque_limits_nm": null,
+  "hardware_validated": false,
+  "depth": {
+    "enabled": false,
+    "note": "当前只使用三路RGB；深度备用，未标定数据不进入控制"
+  }
+}

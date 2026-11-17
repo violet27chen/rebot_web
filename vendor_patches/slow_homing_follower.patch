@@ -306,8 +306,8 @@
 +"""
 +import math
 +
-+HOME_SPEED_RAD_S=.15
-+HOME_ACCEL_RAD_S2=.20
++HOME_SPEED_RAD_S=.20
++HOME_ACCEL_RAD_S2=.25
 +HOME_HZ=50.
 +
 +

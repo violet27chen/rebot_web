@@ -1,0 +1,79 @@
+--- a/datasets/video_utils.py
++++ b/datasets/video_utils.py
+@@ -632,47 +632,33 @@
+         return self
+ 
+     def __exit__(self, exc_type, exc_val, exc_tb):
+-        # Handle any remaining episodes that haven't been batch encoded
+-        if self.dataset.episodes_since_last_encoding > 0:
++        # finalize() only closes parquet writers; it does NOT stop PNG workers.
++        # Drain/join them before encoding or examining image directories.
++        try:
++            logging.info("[视频收尾] 等待图像写盘并停止写盘线程")
++            self.dataset._wait_image_writer()
++            self.dataset.stop_image_writer()
++            try:
++                if self.dataset.episodes_since_last_encoding > 0:
++                    start_ep = self.dataset.num_episodes - self.dataset.episodes_since_last_encoding
++                    self.dataset._batch_save_episode_video(start_ep, self.dataset.num_episodes)
++            finally:
++                self.dataset.finalize()
+             if exc_type is not None:
+-                logging.info("Exception occurred. Encoding remaining episodes before exit...")
+-            else:
+-                logging.info("Recording stopped. Encoding remaining episodes...")
+-
+-            start_ep = self.dataset.num_episodes - self.dataset.episodes_since_last_encoding
+-            end_ep = self.dataset.num_episodes
+-            logging.info(
+-                f"Encoding remaining {self.dataset.episodes_since_last_encoding} episodes, "
+-                f"from episode {start_ep} to {end_ep - 1}"
+-            )
+-            self.dataset._batch_save_episode_video(start_ep, end_ep)
+-
+-        # Finalize the dataset to properly close all writers
+-        self.dataset.finalize()
+-
+-        # Clean up episode images if recording was interrupted
+-        if exc_type is not None:
+-            interrupted_episode_index = self.dataset.num_episodes
+-            for key in self.dataset.meta.video_keys:
+-                img_dir = self.dataset._get_image_file_path(
+-                    episode_index=interrupted_episode_index, image_key=key, frame_index=0
+-                ).parent
+-                if img_dir.exists():
+-                    logging.debug(
+-                        f"Cleaning up interrupted episode images for episode {interrupted_episode_index}, camera {key}"
+-                    )
+-                    shutil.rmtree(img_dir)
+-
+-        # Clean up any remaining images directory if it's empty
+-        img_dir = self.dataset.root / "images"
+-        # Check for any remaining PNG files
+-        png_files = list(img_dir.rglob("*.png"))
+-        if len(png_files) == 0:
+-            # Only remove the images directory if no PNG files remain
+-            if img_dir.exists():
+-                shutil.rmtree(img_dir)
+-                logging.debug("Cleaned up empty images directory")
+-        else:
+-            logging.debug(f"Images directory is not empty, containing {len(png_files)} PNG files")
+-
+-        return False  # Don't suppress the original exception
++                logging.warning("[视频收尾] 保留未完成剧集图片用于诊断；未把失败剧集计为完成；继续抛出原始异常")
++                return False
++            # Remove only empty directories; never recursively delete a tree
++            # which another writer could have populated after the scan.
++            image_root = self.dataset.root / "images"
++            if image_root.exists():
++                for directory in sorted((p for p in image_root.rglob('*') if p.is_dir()), key=lambda p:len(p.parts), reverse=True):
++                    try: directory.rmdir()
++                    except OSError: pass
++                try: image_root.rmdir()
++                except OSError: pass
++            logging.info("[视频收尾] 图像写盘与视频收尾完成")
++        except Exception:
++            if exc_type is None:
++                raise
++            logging.exception("[视频收尾] 清理异常，保留文件；原始执行错误仍会报告")
++        return False
